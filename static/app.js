@@ -221,7 +221,16 @@
 
   function updateSelectedCount() {
     const n = getSelected().length;
-    selectedCountEl.textContent = "Selected: " + n;
+    selectedCountEl.textContent = n + " selected";
+    selectedCountEl.classList.toggle("has-selection", n > 0);
+  }
+
+  // Disable the comments cap when comments aren't being collected.
+  function syncCommentsCap() {
+    const on = includeCommentsEl.checked;
+    maxCommentsEl.disabled = !on;
+    const field = document.getElementById("max-comments-field");
+    if (field) field.classList.toggle("is-disabled", !on);
   }
 
   function clearSelection() {
@@ -233,7 +242,12 @@
   }
 
   // ---- Status / error helpers ------------------------------------------
-  function showStatus(msg) { statusEl.textContent = msg; statusEl.hidden = false; }
+  // level is optional: "ok" (green), "warn" (amber), or undefined (neutral).
+  function showStatus(msg, level) {
+    statusEl.textContent = msg;
+    statusEl.className = "status" + (level ? " " + level : "");
+    statusEl.hidden = false;
+  }
   function hideStatus()    { statusEl.hidden = true; statusEl.textContent = ""; }
   function showError(msg)  { errorEl.textContent = msg; errorEl.hidden = false; }
   function hideError()     { errorEl.hidden = true; errorEl.textContent = ""; }
@@ -268,7 +282,8 @@
   function buildPayload(subreddits) {
     const toInt = (v, def) => {
       const n = parseInt(v, 10);
-      return Number.isFinite(n) && n >= 0 ? n : def;
+      // Server requires 1..100000; fall back to the default for anything else.
+      return Number.isFinite(n) && n >= 1 ? n : def;
     };
     return {
       subreddits: subreddits,
@@ -326,12 +341,43 @@
         }
         const disp = res.headers.get("Content-Disposition");
         const fname = filenameFromDisposition(disp, "reddit_export.xlsx");
-        return res.blob().then((blob) => ({ blob, fname }));
+        // The server reports what it actually collected via response headers.
+        const num = (h) => {
+          const n = parseInt(res.headers.get(h), 10);
+          return Number.isFinite(n) ? n : 0;
+        };
+        const counts = {
+          posts: num("X-Collect-Posts"),
+          comments: num("X-Collect-Comments"),
+          errors: num("X-Collect-Errors"),
+        };
+        return res.blob().then((blob) => ({ blob, fname, counts }));
       })
       .then((out) => {
         if (!out) return; // error path already threw
         triggerDownload(out.blob, out.fname);
-        showStatus("Done. Your spreadsheet (" + out.fname + ") has been downloaded.");
+        const c = out.counts;
+        if (c.posts + c.comments === 0) {
+          // Empty export — tell the user why instead of silently downloading.
+          showStatus(
+            "No posts or comments matched that window, so " + out.fname +
+              " is empty. " +
+              (c.errors
+                ? "pullpush returned " + c.errors +
+                  " error(s) — it may be down right now; try again shortly."
+                : "Try a wider date range or different subreddits."),
+            "warn"
+          );
+        } else {
+          let msg =
+            "Done — exported " + c.posts + " posts and " + c.comments +
+            " comments to " + out.fname + ".";
+          if (c.errors) {
+            msg += " Note: pullpush returned " + c.errors +
+              " error(s), so some data may be missing.";
+          }
+          showStatus(msg, c.errors ? "warn" : "ok");
+        }
       })
       .catch((err) => {
         hideStatus();
@@ -360,6 +406,9 @@
 
   generateBtn.addEventListener("click", onGenerate);
 
+  includeCommentsEl.addEventListener("change", syncCommentsCap);
+
   // ---- Init -------------------------------------------------------------
+  syncCommentsCap();
   loadCategories();
 })();

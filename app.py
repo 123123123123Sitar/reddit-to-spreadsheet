@@ -38,6 +38,9 @@ _ONE_DAY = 86400
 _MAX_CAP = 100_000
 
 app = Flask(__name__, static_folder="static", static_url_path="/static")
+# Preserve CATEGORIES insertion order in JSON (Flask alphabetizes keys by
+# default), so the picker leads with Health rather than sorting groups A-Z.
+app.json.sort_keys = False
 
 
 # --------------------------------------------------------------------------- #
