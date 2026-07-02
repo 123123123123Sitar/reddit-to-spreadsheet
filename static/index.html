@@ -101,10 +101,19 @@
             <div class="field">
               <label class="field-label" for="start-date">Start date</label>
               <input type="date" id="start-date" class="text-input" />
+              <div class="presets presets-date" data-target="start-date">
+                <button type="button" data-preset="earliest">Earliest</button>
+                <button type="button" data-preset="minus5y">5 yr ago</button>
+                <button type="button" data-preset="minus1y">1 yr ago</button>
+              </div>
             </div>
             <div class="field">
               <label class="field-label" for="end-date">End date</label>
               <input type="date" id="end-date" class="text-input" />
+              <div class="presets presets-date" data-target="end-date">
+                <button type="button" data-preset="minus1y">1 yr ago</button>
+                <button type="button" data-preset="today">Most recent</button>
+              </div>
             </div>
 
             <div class="field">

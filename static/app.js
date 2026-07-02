@@ -291,9 +291,35 @@
   });
 
   // ---- Cap preset buttons ----------------------------------------------
+  // Date presets resolve to a YYYY-MM-DD value at click time. "Earliest" is
+  // Reddit's launch date (the practical floor for pullpush/Pushshift data).
+  const REDDIT_EPOCH = "2005-06-23";
+  function isoFromDate(d) {
+    const mm = String(d.getMonth() + 1).padStart(2, "0");
+    const dd = String(d.getDate()).padStart(2, "0");
+    return `${d.getFullYear()}-${mm}-${dd}`;
+  }
+  function isoAgo(years) {
+    const d = new Date();
+    d.setFullYear(d.getFullYear() - years);
+    return isoFromDate(d);
+  }
+  function resolveDatePreset(token) {
+    switch (token) {
+      case "earliest": return REDDIT_EPOCH;
+      case "today":    return isoToday();
+      case "minus1y":  return isoAgo(1);
+      case "minus5y":  return isoAgo(5);
+      default:         return "";
+    }
+  }
+  // A preset button carries either data-val (numeric caps) or data-preset (dates).
+  function presetValue(btn) {
+    return btn.dataset.val != null ? btn.dataset.val : resolveDatePreset(btn.dataset.preset);
+  }
   function markActivePreset(wrap, target) {
-    Array.from(wrap.querySelectorAll("button")).forEach((b) => {
-      b.classList.toggle("active", b.dataset.val === String(target.value));
+    wrap.querySelectorAll("button").forEach((b) => {
+      b.classList.toggle("active", presetValue(b) === String(target.value));
     });
   }
   document.querySelectorAll(".presets").forEach((wrap) => {
@@ -301,7 +327,7 @@
     wrap.querySelectorAll("button").forEach((btn) => {
       btn.addEventListener("click", () => {
         if (target.disabled) return;
-        target.value = btn.dataset.val;
+        target.value = presetValue(btn);
         markActivePreset(wrap, target);
       });
     });
