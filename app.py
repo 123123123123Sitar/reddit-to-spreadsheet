@@ -18,6 +18,7 @@ http://127.0.0.1:5000 with debug turned off.
 
 from __future__ import annotations
 
+import time
 from datetime import datetime, timezone
 
 from flask import Flask, Response, jsonify, request, send_from_directory
@@ -123,8 +124,10 @@ def index():
 
 @app.get("/api/subreddits")
 def api_subreddits():
-    """Return the curated subreddit categories for the picker."""
-    return jsonify({"categories": subreddits.CATEGORIES})
+    """Return the curated categories plus the wider autocomplete pool."""
+    return jsonify(
+        {"categories": subreddits.CATEGORIES, "pool": subreddits.SUGGEST_POOL}
+    )
 
 
 @app.post("/api/collect")
@@ -161,6 +164,7 @@ def api_collect():
         return jsonify({"error": str(exc)}), 400
 
     # --- collect + build workbook (any failure -> HTTP 500) --------------- #
+    started = time.monotonic()
     try:
         result = collector.collect(
             subs,
@@ -180,17 +184,29 @@ def api_collect():
         app.logger.exception("collection failed")
         return jsonify({"error": f"Collection failed: {exc}"}), 500
 
+    elapsed = time.monotonic() - started
+    app.logger.info(
+        "collect done: %d posts, %d comments, %d error(s) in %.1fs (%s)",
+        len(posts), len(comments), len(errors), elapsed, ",".join(subs),
+    )
+
     filename = _safe_filename(subs)
     headers = {
         "Content-Disposition": f'attachment; filename="{filename}"',
-        # Surface per-subreddit (non-fatal) errors + counts for the client.
+        # Surface per-subreddit (non-fatal) errors + counts + timing to the UI.
         "X-Collect-Errors": str(len(errors)),
         "X-Collect-Posts": str(len(posts)),
         "X-Collect-Comments": str(len(comments)),
+        "X-Collect-Seconds": f"{elapsed:.1f}",
     }
     return Response(xlsx_bytes, mimetype=XLSX_MIMETYPE, headers=headers)
 
 
 if __name__ == "__main__":
+    # Show INFO logs (incl. the per-request "collect done ... in N.Ns" timing).
+    import logging
+
+    logging.basicConfig(level=logging.INFO)
+    app.logger.setLevel(logging.INFO)
     # Local-only server; debug off per the project contract.
     app.run(host="127.0.0.1", port=5000, debug=False)

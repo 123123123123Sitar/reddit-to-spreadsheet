@@ -1,28 +1,31 @@
 /*
   reddit-to-spreadsheet — UI logic (vanilla JS, no frameworks).
 
-  Responsibilities:
-    - Load subreddit categories from GET /api/subreddits and render collapsible
-      groups of labeled checkboxes.
-    - Live-filter those checkboxes from the search bar (case-insensitive substring).
-    - Let the user add arbitrary custom subreddits as checked chips.
-    - Track a "selected: N" counter with a clear-selection link.
-    - POST the collection request to /api/collect and stream back an .xlsx download.
+    - Load subreddit categories + a wider autocomplete pool from
+      GET /api/subreddits.
+    - As the user types, show a live suggestions dropdown (pool matches plus an
+      "add exactly what I typed" row) — no Enter required.
+    - Keep a single source of truth for the selection and mirror it into the
+      category checkboxes and a side "Selected" tray.
+    - Quick-set preset buttons for the per-subreddit caps.
+    - POST the request to /api/collect, stream back the .xlsx, and report how
+      long the whole thing took.
 */
 (function () {
   "use strict";
 
-  // ---- Element handles --------------------------------------------------
   const $ = (id) => document.getElementById(id);
 
+  // ---- Element handles --------------------------------------------------
   const searchInput      = $("search");
+  const suggestList      = $("suggest-list");
+  const combo            = searchInput.closest(".combo");
   const categoriesEl     = $("categories");
   const categoriesLoad   = $("categories-loading");
-  const noResultsEl      = $("no-results");
+  const trayList         = $("tray-list");
+  const trayEmpty        = $("tray-empty");
   const selectedCountEl  = $("selected-count");
   const clearSelectionEl = $("clear-selection");
-  const customInput      = $("custom-input");
-  const customChipsEl    = $("custom-chips");
   const startDateEl      = $("start-date");
   const endDateEl        = $("end-date");
   const maxPostsEl       = $("max-posts");
@@ -35,14 +38,12 @@
   const statusEl         = $("status");
   const errorEl          = $("error");
 
-  // Track which subreddit names already have a curated checkbox, so a custom
-  // entry that duplicates a curated one just toggles the existing checkbox
-  // instead of creating a redundant chip. Keyed by lowercased name.
-  const curatedByLower = new Map();   // lower -> checkbox input element
-  const customChips    = new Map();   // lower -> { name, li, checkbox }
+  // ---- State ------------------------------------------------------------
+  const POOL = [];                    // autocomplete pool (from the API)
+  const curatedByLower = new Map();   // lower -> category checkbox element
+  const selected = new Map();         // lower -> display name (source of truth)
 
   // ---- Date defaults ----------------------------------------------------
-  // Default window: 2018-02-07 .. today (per spec).
   function isoToday() {
     const d = new Date();
     const mm = String(d.getMonth() + 1).padStart(2, "0");
@@ -64,6 +65,70 @@
     return node;
   }
 
+  // Accept "r/foo", "/r/foo", "foo"; keep only valid subreddit characters.
+  function sanitizeName(raw) {
+    return raw
+      .trim()
+      .replace(/^\/?(r\/)?/i, "")
+      .replace(/[^A-Za-z0-9_]/g, "")
+      .slice(0, 40);
+  }
+
+  // ---- Selection (single source of truth) -------------------------------
+  function addSel(name) {
+    const clean = sanitizeName(name);
+    if (!clean) return;
+    const lower = clean.toLowerCase();
+    if (!selected.has(lower)) {
+      // Prefer the curated casing if we know it.
+      const display = curatedByLower.has(lower)
+        ? curatedByLower.get(lower).value
+        : clean;
+      selected.set(lower, display);
+      syncAfterChange();
+    }
+  }
+  function removeSel(lower) {
+    if (selected.delete(lower)) syncAfterChange();
+  }
+  function toggleSel(name) {
+    const lower = sanitizeName(name).toLowerCase();
+    if (selected.has(lower)) removeSel(lower);
+    else addSel(name);
+  }
+  function clearSelection() {
+    selected.clear();
+    syncAfterChange();
+  }
+
+  function syncAfterChange() {
+    // Mirror the selection into the category checkboxes.
+    curatedByLower.forEach((cb, lower) => { cb.checked = selected.has(lower); });
+    renderTray();
+    selectedCountEl.textContent = String(selected.size);
+  }
+
+  function renderTray() {
+    trayList.innerHTML = "";
+    const items = Array.from(selected.entries())
+      .sort((a, b) => a[1].toLowerCase().localeCompare(b[1].toLowerCase()));
+
+    items.forEach(([lower, name]) => {
+      const li = el("li", { class: "tray-item" });
+      li.appendChild(el("span", { class: "tray-name", text: "r/" + name }));
+      const remove = el("button", {
+        attrs: { type: "button", "aria-label": "Remove r/" + name },
+        text: "×",
+      });
+      remove.addEventListener("click", () => removeSel(lower));
+      li.appendChild(remove);
+      trayList.appendChild(li);
+    });
+
+    trayEmpty.hidden = selected.size > 0;
+    clearSelectionEl.hidden = selected.size === 0;
+  }
+
   // ---- Load + render categories ----------------------------------------
   function loadCategories() {
     fetch("/api/subreddits", { headers: { Accept: "application/json" } })
@@ -71,11 +136,14 @@
         if (!res.ok) throw new Error("HTTP " + res.status);
         return res.json();
       })
-      .then((data) => renderCategories(data.categories || {}))
+      .then((data) => {
+        (data.pool || []).forEach((n) => POOL.push(n));
+        renderCategories(data.categories || {});
+      })
       .catch((err) => {
         categoriesLoad.textContent =
           "Could not load the subreddit list (" + err.message +
-          "). You can still add custom subreddits above.";
+          "). You can still search for and add any subreddit above.";
       });
   }
 
@@ -85,19 +153,16 @@
 
     if (!names.length) {
       categoriesEl.appendChild(
-        el("p", { class: "loading", text: "No suggested subreddits; add your own above." })
+        el("p", { class: "loading", text: "No suggested subreddits; search above to add your own." })
       );
       return;
     }
 
     names.forEach((catName, idx) => {
       const subs = categories[catName] || [];
-
       const group = el("div", { class: "category" });
-      // Collapse all but the first group by default to keep things tidy.
-      if (idx > 0) group.classList.add("collapsed");
+      if (idx > 0) group.classList.add("collapsed");   // expand only the first
 
-      // Collapsible header (button for keyboard accessibility).
       const header = el("button", { class: "category-header", attrs: { type: "button" } });
       header.setAttribute("aria-expanded", idx === 0 ? "true" : "false");
       header.appendChild(el("span", { class: "category-caret", text: "▼" }));
@@ -109,148 +174,162 @@
       });
       group.appendChild(header);
 
-      // Checkbox body.
       const body = el("div", { class: "category-body" });
       subs.forEach((sub) => {
         const lower = sub.toLowerCase();
         const label = el("label", { class: "sub-item" });
-        label.dataset.name = lower;
-
         const cb = el("input", { attrs: { type: "checkbox", value: sub } });
-        cb.addEventListener("change", updateSelectedCount);
-
-        const span = el("span", { class: "sub-name", text: sub });
+        cb.checked = selected.has(lower);
+        cb.addEventListener("change", () => toggleSel(sub));
         label.appendChild(cb);
-        label.appendChild(span);
+        label.appendChild(el("span", { class: "sub-name", text: sub }));
         body.appendChild(label);
-
-        // Remember first checkbox for each name (avoid duplicate collisions).
         if (!curatedByLower.has(lower)) curatedByLower.set(lower, cb);
       });
       group.appendChild(body);
       categoriesEl.appendChild(group);
     });
-
-    updateSelectedCount();
   }
 
-  // ---- Search / live filter --------------------------------------------
-  function applyFilter() {
-    const q = searchInput.value.trim().toLowerCase();
-    let anyVisible = false;
+  // ---- Suggestions dropdown --------------------------------------------
+  let matches = [];    // [{ name, add }]
+  let activeIdx = -1;
 
-    categoriesEl.querySelectorAll(".category").forEach((group) => {
-      let groupHasMatch = false;
+  function computeMatches(q) {
+    const clean = q.trim();
+    const ql = clean.toLowerCase();
+    if (!ql) return [];
 
-      group.querySelectorAll(".sub-item").forEach((item) => {
-        const match = !q || item.dataset.name.indexOf(q) !== -1;
-        item.hidden = !match;
-        if (match) groupHasMatch = true;
-      });
-
-      // Hide whole group if nothing inside matches; auto-expand matches so the
-      // user can see filtered results without manually opening each group.
-      group.hidden = !groupHasMatch;
-      if (groupHasMatch) {
-        anyVisible = true;
-        if (q) group.classList.remove("collapsed");
-      }
-    });
-
-    noResultsEl.hidden = anyVisible || !q;
-  }
-
-  // ---- Custom subreddit chips ------------------------------------------
-  function sanitizeName(raw) {
-    // Accept "r/foo", "/r/foo", "foo" and trim to a valid-ish token.
-    return raw
-      .trim()
-      .replace(/^\/?(r\/)?/i, "")   // strip leading r/ or /r/
-      .replace(/[^A-Za-z0-9_]/g, "") // subreddit names: letters, digits, underscore
-      .slice(0, 40);
-  }
-
-  function addCustomSubreddit(raw) {
-    const name = sanitizeName(raw);
-    if (!name) return;
-    const lower = name.toLowerCase();
-
-    // If it matches a curated checkbox, just check that one instead.
-    if (curatedByLower.has(lower)) {
-      const cb = curatedByLower.get(lower);
-      cb.checked = true;
-      updateSelectedCount();
-      return;
+    const starts = [];
+    const contains = [];
+    for (const name of POOL) {
+      const nl = name.toLowerCase();
+      if (nl.startsWith(ql)) starts.push(name);
+      else if (nl.indexOf(ql) !== -1) contains.push(name);
     }
-    // Already added as a chip? no-op.
-    if (customChips.has(lower)) return;
+    const pooled = starts.concat(contains).slice(0, 8).map((name) => ({ name, add: false }));
 
-    const li = el("li", { class: "chip" });
-    // A hidden checkbox keeps chip selection consistent with getSelected().
-    const cb = el("input", { attrs: { type: "checkbox", value: name } });
-    cb.checked = true;
-    cb.hidden = true;
-
-    li.appendChild(cb);
-    li.appendChild(el("span", { text: "r/" + name }));
-
-    const remove = el("button", { attrs: { type: "button", "aria-label": "Remove r/" + name }, text: "×" });
-    remove.addEventListener("click", () => {
-      li.remove();
-      customChips.delete(lower);
-      updateSelectedCount();
-    });
-    li.appendChild(remove);
-
-    customChipsEl.appendChild(li);
-    customChips.set(lower, { name, li, checkbox: cb });
-    updateSelectedCount();
+    // Always let the user add exactly what they typed (unless it's already a
+    // pool entry with that exact name).
+    const typed = sanitizeName(clean);
+    const exactInPool = POOL.some((n) => n.toLowerCase() === ql);
+    if (typed && !exactInPool) pooled.unshift({ name: typed, add: true });
+    return pooled;
   }
 
-  // ---- Selection accounting --------------------------------------------
-  function getSelected() {
-    const set = new Map(); // lower -> original-cased name (dedupe, keep first)
-    curatedByLower.forEach((cb, lower) => {
-      if (cb.checked && !set.has(lower)) set.set(lower, cb.value);
+  function renderSuggest(q) {
+    matches = computeMatches(q);
+    activeIdx = -1;
+    if (!matches.length) { hideSuggest(); return; }
+
+    suggestList.innerHTML = "";
+    matches.forEach((m, i) => {
+      const li = el("li", { class: "suggest-item", attrs: { role: "option", "data-idx": String(i) } });
+      const already = !m.add && selected.has(m.name.toLowerCase());
+      if (m.add) {
+        li.classList.add("suggest-add");
+        li.appendChild(el("span", { class: "suggest-plus", text: "+" }));
+        li.appendChild(el("span", { text: "Add r/" + m.name }));
+      } else {
+        li.appendChild(el("span", { class: "suggest-r", text: "r/" }));
+        li.appendChild(el("span", { text: m.name }));
+        if (already) li.appendChild(el("span", { class: "suggest-check", text: "✓ added" }));
+      }
+      li.addEventListener("mousedown", (e) => { e.preventDefault(); chooseSuggest(i); });
+      suggestList.appendChild(li);
     });
-    customChips.forEach((chip, lower) => {
-      if (chip.checkbox.checked && !set.has(lower)) set.set(lower, chip.name);
-    });
-    return Array.from(set.values());
+    suggestList.hidden = false;
+    searchInput.setAttribute("aria-expanded", "true");
   }
 
-  function updateSelectedCount() {
-    const n = getSelected().length;
-    selectedCountEl.textContent = n + " selected";
-    selectedCountEl.classList.toggle("has-selection", n > 0);
+  function chooseSuggest(i) {
+    const m = matches[i];
+    if (!m) return;
+    addSel(m.name);
+    searchInput.value = "";
+    hideSuggest();
+    searchInput.focus();
   }
 
-  // Disable the comments cap when comments aren't being collected.
+  function hideSuggest() {
+    suggestList.hidden = true;
+    suggestList.innerHTML = "";
+    searchInput.setAttribute("aria-expanded", "false");
+    matches = [];
+    activeIdx = -1;
+  }
+
+  function highlightActive() {
+    Array.from(suggestList.children).forEach((li, i) => {
+      li.classList.toggle("active", i === activeIdx);
+    });
+    if (activeIdx >= 0 && suggestList.children[activeIdx]) {
+      suggestList.children[activeIdx].scrollIntoView({ block: "nearest" });
+    }
+  }
+
+  function moveActive(delta) {
+    if (!matches.length) return;
+    activeIdx = (activeIdx + delta + matches.length) % matches.length;
+    highlightActive();
+  }
+
+  searchInput.addEventListener("input", () => renderSuggest(searchInput.value));
+  searchInput.addEventListener("focus", () => { if (searchInput.value) renderSuggest(searchInput.value); });
+  searchInput.addEventListener("keydown", (e) => {
+    if (e.key === "ArrowDown") { e.preventDefault(); moveActive(1); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); moveActive(-1); }
+    else if (e.key === "Enter") {
+      e.preventDefault();
+      if (matches.length) chooseSuggest(activeIdx >= 0 ? activeIdx : 0);
+    } else if (e.key === "Escape") {
+      hideSuggest();
+    }
+  });
+  document.addEventListener("click", (e) => {
+    if (!combo.contains(e.target)) hideSuggest();
+  });
+
+  // ---- Cap preset buttons ----------------------------------------------
+  function markActivePreset(wrap, target) {
+    Array.from(wrap.querySelectorAll("button")).forEach((b) => {
+      b.classList.toggle("active", b.dataset.val === String(target.value));
+    });
+  }
+  document.querySelectorAll(".presets").forEach((wrap) => {
+    const target = $(wrap.dataset.target);
+    wrap.querySelectorAll("button").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        if (target.disabled) return;
+        target.value = btn.dataset.val;
+        markActivePreset(wrap, target);
+      });
+    });
+    // Manual edits clear the active preset unless they land on one.
+    target.addEventListener("input", () => markActivePreset(wrap, target));
+    markActivePreset(wrap, target);
+  });
+
+  // Disable the comments cap (and its presets) when comments are excluded.
   function syncCommentsCap() {
     const on = includeCommentsEl.checked;
     maxCommentsEl.disabled = !on;
-    const field = document.getElementById("max-comments-field");
-    if (field) field.classList.toggle("is-disabled", !on);
-  }
-
-  function clearSelection() {
-    curatedByLower.forEach((cb) => { cb.checked = false; });
-    // Remove all custom chips too.
-    customChips.forEach((chip) => chip.li.remove());
-    customChips.clear();
-    updateSelectedCount();
+    const field = $("max-comments-field");
+    if (field) {
+      field.classList.toggle("is-disabled", !on);
+      field.querySelectorAll(".presets button").forEach((b) => { b.disabled = !on; });
+    }
   }
 
   // ---- Status / error helpers ------------------------------------------
-  // level is optional: "ok" (green), "warn" (amber), or undefined (neutral).
   function showStatus(msg, level) {
     statusEl.textContent = msg;
     statusEl.className = "status" + (level ? " " + level : "");
     statusEl.hidden = false;
   }
-  function hideStatus()    { statusEl.hidden = true; statusEl.textContent = ""; }
-  function showError(msg)  { errorEl.textContent = msg; errorEl.hidden = false; }
-  function hideError()     { errorEl.hidden = true; errorEl.textContent = ""; }
+  function hideStatus() { statusEl.hidden = true; statusEl.textContent = ""; }
+  function showError(msg) { errorEl.textContent = msg; errorEl.hidden = false; }
+  function hideError() { errorEl.hidden = true; errorEl.textContent = ""; }
 
   function setBusy(busy) {
     generateBtn.disabled = busy;
@@ -261,7 +340,6 @@
   // ---- Download trigger -------------------------------------------------
   function filenameFromDisposition(header, fallback) {
     if (!header) return fallback;
-    // Handle RFC5987 (filename*=UTF-8''...) and plain filename="...".
     let m = /filename\*=(?:UTF-8'')?["']?([^"';]+)["']?/i.exec(header);
     if (m && m[1]) { try { return decodeURIComponent(m[1]); } catch (e) { return m[1]; } }
     m = /filename=["']?([^"';]+)["']?/i.exec(header);
@@ -274,19 +352,17 @@
     document.body.appendChild(a);
     a.click();
     a.remove();
-    // Revoke slightly later so the download has a chance to start.
     setTimeout(() => URL.revokeObjectURL(url), 4000);
   }
 
   // ---- Build request payload -------------------------------------------
-  function buildPayload(subreddits) {
+  function buildPayload() {
     const toInt = (v, def) => {
       const n = parseInt(v, 10);
-      // Server requires 1..100000; fall back to the default for anything else.
-      return Number.isFinite(n) && n >= 1 ? n : def;
+      return Number.isFinite(n) && n >= 1 ? n : def;  // server requires 1..100000
     };
     return {
-      subreddits: subreddits,
+      subreddits: Array.from(selected.values()),
       start_date: startDateEl.value,
       end_date: endDateEl.value,
       include_comments: includeCommentsEl.checked,
@@ -301,13 +377,12 @@
     hideError();
     hideStatus();
 
-    const subreddits = getSelected();
-    if (subreddits.length === 0) {
-      showError("Please select at least one subreddit (check a box or add a custom one).");
+    if (selected.size === 0) {
+      showError("Select at least one subreddit — search above or pick from the list.");
       return;
     }
     if (!startDateEl.value || !endDateEl.value) {
-      showError("Please choose both a start and end date.");
+      showError("Choose both a start and end date.");
       return;
     }
     if (startDateEl.value > endDateEl.value) {
@@ -318,18 +393,18 @@
     setBusy(true);
     showStatus(
       "Collecting from pullpush… this can take a minute; pullpush is a flaky " +
-      "community mirror so retries are normal."
+      "community mirror, so retries are normal."
     );
 
+    const t0 = performance.now();
     fetch("/api/collect", {
       method: "POST",
       headers: { "Content-Type": "application/json", Accept: "*/*" },
-      body: JSON.stringify(buildPayload(subreddits)),
+      body: JSON.stringify(buildPayload()),
     })
       .then((res) => {
         const ctype = res.headers.get("Content-Type") || "";
         if (!res.ok) {
-          // Server returns JSON error bodies for 400/500.
           if (ctype.indexOf("application/json") !== -1) {
             return res.json().then((j) => {
               throw new Error(j.error || j.message || ("Request failed (HTTP " + res.status + ")."));
@@ -339,42 +414,41 @@
             throw new Error(t || ("Request failed (HTTP " + res.status + ")."));
           });
         }
-        const disp = res.headers.get("Content-Disposition");
-        const fname = filenameFromDisposition(disp, "reddit_export.xlsx");
-        // The server reports what it actually collected via response headers.
-        const num = (h) => {
-          const n = parseInt(res.headers.get(h), 10);
-          return Number.isFinite(n) ? n : 0;
-        };
+        const fname = filenameFromDisposition(
+          res.headers.get("Content-Disposition"), "reddit_export.xlsx"
+        );
+        const num = (h) => { const n = parseInt(res.headers.get(h), 10); return Number.isFinite(n) ? n : 0; };
         const counts = {
           posts: num("X-Collect-Posts"),
           comments: num("X-Collect-Comments"),
           errors: num("X-Collect-Errors"),
+          serverSecs: res.headers.get("X-Collect-Seconds") || null,
         };
         return res.blob().then((blob) => ({ blob, fname, counts }));
       })
       .then((out) => {
-        if (!out) return; // error path already threw
+        if (!out) return;
+        const secs = ((performance.now() - t0) / 1000).toFixed(1);
         triggerDownload(out.blob, out.fname);
         const c = out.counts;
+        console.log(
+          "[reddit-to-spreadsheet] workflow completed in " + secs + "s",
+          { posts: c.posts, comments: c.comments, errors: c.errors, serverSeconds: c.serverSecs }
+        );
         if (c.posts + c.comments === 0) {
-          // Empty export — tell the user why instead of silently downloading.
           showStatus(
-            "No posts or comments matched that window, so " + out.fname +
-              " is empty. " +
+            "Finished in " + secs + "s, but no posts or comments matched that window, so " +
+              out.fname + " is empty. " +
               (c.errors
-                ? "pullpush returned " + c.errors +
-                  " error(s) — it may be down right now; try again shortly."
+                ? "pullpush returned " + c.errors + " error(s) — it may be down right now; try again shortly."
                 : "Try a wider date range or different subreddits."),
             "warn"
           );
         } else {
-          let msg =
-            "Done — exported " + c.posts + " posts and " + c.comments +
-            " comments to " + out.fname + ".";
+          let msg = "Done in " + secs + "s — exported " + c.posts + " posts and " +
+            c.comments + " comments to " + out.fname + ".";
           if (c.errors) {
-            msg += " Note: pullpush returned " + c.errors +
-              " error(s), so some data may be missing.";
+            msg += " Note: pullpush returned " + c.errors + " error(s), so some data may be missing.";
           }
           showStatus(msg, c.errors ? "warn" : "ok");
         }
@@ -383,32 +457,16 @@
         hideStatus();
         showError(err.message || "Something went wrong while collecting data.");
       })
-      .finally(() => {
-        setBusy(false);
-      });
+      .finally(() => { setBusy(false); });
   }
 
   // ---- Wire up events ---------------------------------------------------
-  searchInput.addEventListener("input", applyFilter);
-
-  clearSelectionEl.addEventListener("click", (e) => {
-    e.preventDefault();
-    clearSelection();
-  });
-
-  customInput.addEventListener("keydown", (e) => {
-    if (e.key === "Enter") {
-      e.preventDefault();
-      addCustomSubreddit(customInput.value);
-      customInput.value = "";
-    }
-  });
-
+  clearSelectionEl.addEventListener("click", clearSelection);
   generateBtn.addEventListener("click", onGenerate);
-
   includeCommentsEl.addEventListener("change", syncCommentsCap);
 
   // ---- Init -------------------------------------------------------------
   syncCommentsCap();
+  renderTray();
   loadCategories();
 })();
