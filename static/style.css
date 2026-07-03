@@ -1,12 +1,9 @@
 /*
-  reddit-to-spreadsheet — "worksheet" theme.
+  reddit-to-spreadsheet — minimal black & white theme.
 
-  The idea: the payoff is a spreadsheet, so the control panel *is* one.
-  A row-number rail (01/02/03) marks the real Source -> Window -> Export
-  sequence, hairline rules divide the rows, monospace carries all the data
-  labels, and a faint cell grid sits behind the picker. Accent is a ledger
-  green (the export / valid-cell color); one reddit-orange spark marks the
-  source. No external assets — system fonts only.
+  A row-number rail (01/02/03) marks the Source -> Window -> Export steps and
+  hairline rules divide them. Monochrome only: black for the primary action and
+  selected states, greys for everything else. No external assets — system fonts.
 */
 
 :root {
@@ -20,18 +17,18 @@
   --line-2:       #d5dae1;   /* stronger borders (inputs, sheet edge) */
   --grid:         rgba(20, 24, 31, 0.045);
 
-  --accent:       #0b7a4f;   /* ledger green — export / valid cell */
-  --accent-ink:   #075e3c;
-  --accent-tint:  #e7f3ec;   /* "selected cell" fill */
-  --accent-ring:  rgba(11, 122, 79, 0.20);
-  --spark:        #ff4500;   /* reddit — used only at the source */
+  --accent:       #16181d;   /* black — primary action / selected */
+  --accent-ink:   #000000;
+  --accent-tint:  #eeeef0;   /* light grey fill for selected / hover */
+  --accent-ring:  rgba(20, 24, 31, 0.16);
+  --spark:        #16181d;
 
-  --warn:         #8a5a00;
-  --warn-bg:      #fdf4e3;
-  --warn-line:    #f0dcae;
-  --danger:       #a3231b;
-  --danger-bg:    #fdecea;
-  --danger-line:  #f2c7c3;
+  --warn:         #3a3f47;
+  --warn-bg:      #f2f2f4;
+  --warn-line:    #d8dce1;
+  --danger:       #14181f;
+  --danger-bg:    #f2f2f4;
+  --danger-line:  #cdd2d9;
 
   --radius:       14px;
   --shadow:       0 1px 2px rgba(16, 24, 40, 0.04),
@@ -114,9 +111,8 @@ a { color: var(--accent-ink); }
   font-weight: 600;
   letter-spacing: 0.2em;
   text-transform: uppercase;
-  color: var(--accent);
+  color: var(--muted);
 }
-.eyebrow::before { content: "▦ "; color: var(--spark); }
 .hero-title {
   margin: 0;
   font-size: clamp(2.15rem, 6.4vw, 3.4rem);
@@ -130,42 +126,6 @@ a { color: var(--accent-ink); }
   color: var(--muted);
   font-size: 1.06rem;
 }
-
-/* Formula bar — the signature element. */
-.formula {
-  display: flex;
-  align-items: stretch;
-  margin-top: 30px;
-  max-width: 460px;
-  border: 1px solid var(--line-2);
-  border-radius: 9px;
-  background: var(--sheet);
-  box-shadow: 0 1px 2px rgba(16, 24, 40, 0.05);
-  overflow: hidden;
-}
-.formula-fx {
-  display: flex;
-  align-items: center;
-  padding: 0 13px;
-  font-family: var(--mono);
-  font-style: italic;
-  font-size: 0.82rem;
-  font-weight: 600;
-  color: var(--faint);
-  background: #f6f7f9;
-  border-right: 1px solid var(--line);
-}
-.formula-body {
-  padding: 11px 14px;
-  font-family: var(--mono);
-  font-size: 0.9rem;
-  color: var(--ink);
-  overflow-x: auto;
-  white-space: nowrap;
-}
-.tok-src  { color: var(--spark); }
-.tok-win  { color: var(--muted); }
-.tok-rows { color: var(--accent); font-weight: 600; }
 
 /* ---------- Worksheet ---------- */
 .worksheet {
@@ -389,7 +349,7 @@ a { color: var(--accent-ink); }
   border-radius: 4px;
   flex: none;
 }
-.tray-item button:hover { color: var(--danger); background: var(--danger-bg); }
+.tray-item button:hover { color: var(--ink); background: #ececee; }
 .tray-empty {
   margin: 0;
   font-size: 0.8rem;
@@ -410,7 +370,7 @@ a { color: var(--accent-ink); }
   color: var(--muted);
   cursor: pointer;
 }
-.tray-clear:hover { color: var(--danger); border-color: var(--danger-line); background: var(--danger-bg); }
+.tray-clear:hover { color: var(--ink); border-color: var(--line-2); background: #ececee; }
 
 /* ---------- Suggested communities ---------- */
 .suggested-head {
@@ -548,7 +508,7 @@ a { color: var(--accent-ink); }
   font-size: 1rem;
   cursor: pointer;
   transition: background 0.15s ease, transform 0.05s ease, box-shadow 0.15s ease;
-  box-shadow: 0 1px 2px rgba(7, 94, 60, 0.28), 0 8px 18px -8px rgba(7, 94, 60, 0.5);
+  box-shadow: 0 1px 2px rgba(16, 24, 40, 0.22), 0 8px 18px -8px rgba(16, 24, 40, 0.4);
 }
 .btn-primary:hover:not(:disabled) { background: var(--accent-ink); }
 .btn-primary:active:not(:disabled) { transform: translateY(1px); }
@@ -585,9 +545,11 @@ a { color: var(--accent-ink); }
   margin: 15px 0 0;
   padding: 11px 14px;
   font-size: 0.92rem;
-  color: var(--danger);
+  font-weight: 500;
+  color: var(--ink);
   background: var(--danger-bg);
   border: 1px solid var(--danger-line);
+  border-left: 3px solid var(--ink);
   border-radius: 9px;
 }
 
@@ -635,7 +597,6 @@ a { color: var(--accent-ink); }
   .step-body { padding: 20px 16px; }
   .options-grid { grid-template-columns: 1fr; }
   .btn-primary { width: 100%; justify-content: center; }
-  .formula { max-width: 100%; }
 }
 
 /* ---------- Motion preference ---------- */
