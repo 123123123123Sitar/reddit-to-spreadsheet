@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+tests/
+.pytest_cache/
+.playwright-mcp/
+mercury_key.txt
+.env
+*.xlsx

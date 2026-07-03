@@ -223,3 +223,19 @@ def test_suggest_endpoint_fallback(client, monkeypatch):
     assert "endometriosis" not in names  # never suggest what's already selected
     # endometriosis is women's health -> should surface other women's-health subs
     assert any(n in names for n in ("pcos", "adenomyosis", "pmdd"))
+
+
+def test_chat_endpoint_fallback(client, monkeypatch):
+    # RTS_FAKE=1 skips Mercury -> exercises the keyword/theme fallback offline.
+    monkeypatch.setenv("RTS_FAKE", "1")
+    resp = client.post("/api/chat", json={"message": "lupus and joint pain"})
+    assert resp.status_code == 200
+    data = resp.get_json()
+    names = [s.lower() for s in data["subreddits"]]
+    assert "lupus" in names            # directly named
+    assert len(names) > 1              # expanded to the autoimmune theme
+    assert data["reply"]
+
+    empty = client.post("/api/chat", json={"message": ""})
+    assert empty.status_code == 200
+    assert empty.get_json()["subreddits"] == []

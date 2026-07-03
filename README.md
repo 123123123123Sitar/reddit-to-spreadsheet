@@ -15,7 +15,30 @@ Then open http://127.0.0.1:5000 in your browser.
 
 ## How it works
 
-Pick one or more subreddits (from the curated list or type your own), set a date window and options, click collect — the app fetches the data from pullpush.io and hands you back a formatted spreadsheet.
+Pick one or more subreddits (search, tap a suggestion, or **describe a condition in the chat box** and the relevant communities are auto-selected), set a date window and options, click collect — the app fetches the data from pullpush.io and hands you back a formatted spreadsheet.
+
+## AI suggestions & chat (Mercury 2)
+
+The "Suggested" panel and the chat box ("describe a condition → auto-select communities") are powered by **Mercury 2** (Inception Labs, OpenAI-compatible). Provide the key via the `MERCURY_API_KEY` environment variable:
+
+```bash
+export MERCURY_API_KEY=sk_...      # or place it in ~/mercury_key.txt for local dev
+```
+
+Without a key, both features fall back to a built-in static keyword/theme matcher. Suggestion names and post counts are model **estimates**, not live Reddit data.
+
+## Deploy to Vercel
+
+The app is Vercel-ready (Python/Flask via `@vercel/python`, config in `vercel.json`).
+
+```bash
+npm i -g vercel           # if needed
+vercel                    # first deploy (preview) — links/creates the project
+vercel env add MERCURY_API_KEY production   # paste the key when prompted
+vercel --prod             # promote to production
+```
+
+Set `MERCURY_API_KEY` in the Vercel project (CLI above or Project → Settings → Environment Variables). Note: large collections can exceed Vercel's function time limit — keep the per-subreddit caps modest for the hosted version.
 
 ## Offline demo mode (`RTS_FAKE=1`)
 

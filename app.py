@@ -139,6 +139,104 @@ def _fallback_suggest(selected_lower: set[str]) -> list[dict]:
         names = list(subreddits.POPULAR)
     return [{"name": n, "posts": None} for n in names]
 
+
+# --- Chat: free-text condition -> relevant subreddits ---------------------- #
+_THEME_KEYWORDS = {
+    "women": "Women's health", "gyneco": "Women's health", "reproduct": "Women's health",
+    "endo": "Women's health", "fertil": "Women's health", "menopause": "Women's health",
+    "cancer": "Cancer", "tumor": "Cancer", "oncolog": "Cancer", "leukemia": "Cancer",
+    "lymphoma": "Cancer", "autoimmun": "Autoimmune & rheumatic", "lupus": "Autoimmune & rheumatic",
+    "arthrit": "Autoimmune & rheumatic", "rheumat": "Autoimmune & rheumatic",
+    "diabet": "Diabetes & endocrine", "insulin": "Diabetes & endocrine",
+    "thyroid": "Diabetes & endocrine", "endocrine": "Diabetes & endocrine",
+    "gut": "Digestive & GI", "bowel": "Digestive & GI", "digest": "Digestive & GI",
+    "ibs": "Digestive & GI", "crohn": "Digestive & GI", "colitis": "Digestive & GI",
+    "pain": "Chronic pain & neurological", "migrain": "Chronic pain & neurological",
+    "fibro": "Chronic pain & neurological", "neuro": "Chronic pain & neurological",
+    "asthma": "Respiratory", "lung": "Respiratory", "breath": "Respiratory",
+    "copd": "Respiratory", "mental": "Mental health", "depress": "Mental health",
+    "anxiety": "Mental health", "adhd": "Mental health", "bipolar": "Mental health",
+}
+
+
+def _mercury_chat(message: str) -> dict | None:
+    """Map a free-text condition description to subreddits via Mercury 2."""
+    if os.environ.get("RTS_FAKE") == "1":
+        return None
+    key = _mercury_key()
+    if not key:
+        return None
+    prompt = (
+        'A researcher wrote: "' + message + '". Identify the health condition(s) '
+        "they mean and list the most relevant real health / patient-support "
+        "subreddits to analyze for it (between 5 and 12, exact names, no r/ prefix). "
+        "Also write a one-sentence friendly reply naming the condition and how many "
+        'communities you selected. Respond as JSON: '
+        '{"reply":"...","subreddits":["..."]}'
+    )
+    try:
+        resp = requests.post(
+            MERCURY_URL,
+            timeout=20,
+            headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+            json={
+                "model": MERCURY_MODEL,
+                "temperature": 0.3,
+                "response_format": {"type": "json_object"},
+                "messages": [
+                    {"role": "system", "content": "You help researchers find real Reddit health and patient-support communities. Respond as JSON."},
+                    {"role": "user", "content": prompt},
+                ],
+            },
+        )
+        resp.raise_for_status()
+        data = json.loads(resp.json()["choices"][0]["message"]["content"])
+    except Exception:  # noqa: BLE001 - any failure falls back
+        app.logger.exception("mercury chat failed")
+        return None
+    if not isinstance(data, dict):
+        return None
+    subs = data.get("subreddits")
+    return {
+        "reply": str(data.get("reply", "")),
+        "subreddits": subs if isinstance(subs, list) else [],
+    }
+
+
+def _fallback_chat(message: str) -> dict:
+    """Keyword match a condition description to subreddits when Mercury is off."""
+    msg = message.lower()
+    names, seen = [], set()
+
+    # Directly named communities.
+    for n in subreddits.POOL:
+        if len(n) >= 4 and n.lower() in msg and n.lower() not in seen:
+            seen.add(n.lower())
+            names.append(n)
+
+    # Expand to the themes those hits (and any keyword) belong to.
+    sub_themes: dict[str, list[str]] = {}
+    for theme, subs in subreddits.THEMES.items():
+        for s in subs:
+            sub_themes.setdefault(s.lower(), []).append(theme)
+    active = {t for n in names for t in sub_themes.get(n.lower(), [])}
+    for kw, theme in _THEME_KEYWORDS.items():
+        if kw in msg:
+            active.add(theme)
+    for theme in subreddits.THEMES:
+        if theme in active:
+            for s in subreddits.THEMES[theme]:
+                if s.lower() not in seen:
+                    seen.add(s.lower())
+                    names.append(s)
+
+    names = names[:14]
+    if names:
+        reply = f"Selected {len(names)} communities matching your description."
+    else:
+        reply = "I couldn't map that to a community — try naming a condition, e.g. lupus."
+    return {"reply": reply, "subreddits": names}
+
 # XLSX MIME type used both for the response Content-Type and by the tests.
 XLSX_MIMETYPE = (
     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -287,6 +385,29 @@ def api_suggest():
     result = {"suggestions": out, "source": source}
     _SUGGEST_CACHE[cache_key] = result
     return jsonify(result)
+
+
+@app.post("/api/chat")
+def api_chat():
+    """Turn a free-text condition description into subreddits to auto-select."""
+    payload = request.get_json(silent=True) or {}
+    message = str(payload.get("message", "")).strip()[:500]
+    if not message:
+        return jsonify({"reply": "Tell me what condition you're researching.", "subreddits": []})
+
+    result = _mercury_chat(message) or _fallback_chat(message)
+
+    clean, seen = [], set()
+    for n in result.get("subreddits", []):
+        name = str(n).strip().lstrip("/")
+        if name.lower().startswith("r/"):
+            name = name[2:]
+        name = name.strip("/").strip()
+        if name and name.lower() not in seen:
+            seen.add(name.lower())
+            clean.append(name)
+
+    return jsonify({"reply": result.get("reply", ""), "subreddits": clean[:16]})
 
 
 @app.post("/api/collect")

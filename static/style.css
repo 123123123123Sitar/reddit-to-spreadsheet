@@ -226,6 +226,95 @@ a { color: var(--accent-ink); }
   background-size: 16px 16px;
 }
 
+/* ---------- Chat (describe a condition -> auto-select) ---------- */
+.chat {
+  border: 1px solid var(--line-2);
+  border-radius: 11px;
+  background: #fafbfc;
+  padding: 12px;
+  margin-bottom: 20px;
+}
+.chat-log {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 220px;
+  overflow-y: auto;
+  margin-bottom: 10px;
+}
+.chat-intro {
+  margin: 0;
+  font-size: 0.88rem;
+  color: var(--muted);
+  line-height: 1.5;
+}
+.chat-eg {
+  border: 1px solid var(--line-2);
+  background: var(--sheet);
+  border-radius: 6px;
+  padding: 1px 7px;
+  font: inherit;
+  font-size: 0.84rem;
+  color: var(--ink);
+  cursor: pointer;
+}
+.chat-eg:hover { border-color: var(--ink); }
+.chat-msg { display: flex; }
+.chat-msg.user { justify-content: flex-end; }
+.chat-bubble {
+  max-width: 84%;
+  padding: 8px 12px;
+  border-radius: 12px;
+  font-size: 0.9rem;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.chat-msg.user .chat-bubble {
+  background: var(--ink);
+  color: #fff;
+  border-bottom-right-radius: 4px;
+}
+.chat-msg.bot .chat-bubble {
+  background: var(--sheet);
+  border: 1px solid var(--line-2);
+  color: var(--ink);
+  border-bottom-left-radius: 4px;
+}
+.chat-form {
+  display: flex;
+  gap: 8px;
+}
+.chat-input {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  color: var(--ink);
+  background: var(--sheet);
+  border: 1px solid var(--line-2);
+  border-radius: 9px;
+  padding: 10px 12px;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+.chat-input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-ring);
+}
+.chat-send {
+  flex: none;
+  width: 42px;
+  border: none;
+  border-radius: 9px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 1.1rem;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+.chat-send:hover:not(:disabled) { background: var(--accent-ink); }
+.chat-send:disabled { opacity: 0.5; cursor: progress; }
+
 /* ---------- Source layout: picker + selection tray ---------- */
 .source-grid {
   display: grid;

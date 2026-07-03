@@ -39,6 +39,29 @@
             <span class="step-hint">which communities</span>
           </div>
 
+          <!-- Chat: describe a condition, get the communities auto-selected. -->
+          <div class="chat">
+            <div class="chat-log" id="chat-log">
+              <p class="chat-intro">
+                Not sure which to pick? Describe what you&rsquo;re researching and I&rsquo;ll
+                select the communities &mdash; try
+                <button type="button" class="chat-eg" data-eg="endometriosis and fertility">endometriosis and fertility</button>
+                or
+                <button type="button" class="chat-eg" data-eg="type 1 diabetes">type 1 diabetes</button>.
+              </p>
+            </div>
+            <form class="chat-form" id="chat-form">
+              <input
+                type="text"
+                id="chat-input"
+                class="chat-input"
+                placeholder="Describe a condition — e.g. lupus and joint pain"
+                autocomplete="off"
+              />
+              <button type="submit" class="chat-send" id="chat-send" aria-label="Send">&rarr;</button>
+            </form>
+          </div>
+
           <div class="source-grid">
             <div class="source-main">
               <!-- Search + add: suggestions appear as you type, click to add. -->

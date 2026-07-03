@@ -22,6 +22,10 @@
   const combo            = searchInput.closest(".combo");
   const suggestedEl      = $("suggested");
   const suggestedNote    = $("suggested-note");
+  const chatLog          = $("chat-log");
+  const chatForm         = $("chat-form");
+  const chatInput        = $("chat-input");
+  const chatSend         = $("chat-send");
   const trayList         = $("tray-list");
   const trayEmpty        = $("tray-empty");
   const selectedCountEl  = $("selected-count");
@@ -461,6 +465,58 @@
       })
       .finally(() => { setBusy(false); });
   }
+
+  // ---- Chat: describe a condition -> auto-select communities -----------
+  function addBubble(role, text) {
+    const intro = chatLog.querySelector(".chat-intro");
+    if (intro) intro.remove();
+    const msg = el("div", { class: "chat-msg " + role });
+    const bubble = el("span", { class: "chat-bubble", text });
+    msg.appendChild(bubble);
+    chatLog.appendChild(msg);
+    chatLog.scrollTop = chatLog.scrollHeight;
+    return msg;
+  }
+
+  function sendChat(message) {
+    message = (message || "").trim();
+    if (!message) return;
+    addBubble("user", message);
+    chatInput.value = "";
+    chatInput.disabled = true;
+    chatSend.disabled = true;
+    const thinking = addBubble("bot", "…");
+
+    fetch("/api/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify({ message }),
+    })
+      .then((res) => (res.ok ? res.json() : Promise.reject(new Error("HTTP " + res.status))))
+      .then((data) => {
+        thinking.remove();
+        const subs = (data.subreddits || []).filter(Boolean);
+        subs.forEach(addSel);   // auto-select every relevant community
+        const reply = data.reply ||
+          (subs.length ? "Selected " + subs.length + " communities." : "I couldn't find matching communities.");
+        addBubble("bot", reply + (subs.length ? "\n" + subs.map((s) => "r/" + s).join(", ") : ""));
+      })
+      .catch(() => {
+        thinking.remove();
+        addBubble("bot", "Sorry — I couldn't reach the assistant. Try the search box instead.");
+      })
+      .finally(() => {
+        chatInput.disabled = false;
+        chatSend.disabled = false;
+        chatInput.focus();
+      });
+  }
+
+  chatForm.addEventListener("submit", (e) => { e.preventDefault(); sendChat(chatInput.value); });
+  chatLog.addEventListener("click", (e) => {
+    const eg = e.target.closest(".chat-eg");
+    if (eg) sendChat(eg.dataset.eg);
+  });
 
   // ---- Wire up events ---------------------------------------------------
   clearSelectionEl.addEventListener("click", clearSelection);
