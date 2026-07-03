@@ -242,23 +242,7 @@ a { color: var(--accent-ink); }
   overflow-y: auto;
   margin-bottom: 10px;
 }
-.chat-intro {
-  margin: 0;
-  font-size: 0.88rem;
-  color: var(--muted);
-  line-height: 1.5;
-}
-.chat-eg {
-  border: 1px solid var(--line-2);
-  background: var(--sheet);
-  border-radius: 6px;
-  padding: 1px 7px;
-  font: inherit;
-  font-size: 0.84rem;
-  color: var(--ink);
-  cursor: pointer;
-}
-.chat-eg:hover { border-color: var(--ink); }
+.chat-log:empty { display: none; }
 .chat-msg { display: flex; }
 .chat-msg.user { justify-content: flex-end; }
 .chat-bubble {

@@ -468,8 +468,6 @@
 
   // ---- Chat: describe a condition -> auto-select communities -----------
   function addBubble(role, text) {
-    const intro = chatLog.querySelector(".chat-intro");
-    if (intro) intro.remove();
     const msg = el("div", { class: "chat-msg " + role });
     const bubble = el("span", { class: "chat-bubble", text });
     msg.appendChild(bubble);
@@ -513,10 +511,6 @@
   }
 
   chatForm.addEventListener("submit", (e) => { e.preventDefault(); sendChat(chatInput.value); });
-  chatLog.addEventListener("click", (e) => {
-    const eg = e.target.closest(".chat-eg");
-    if (eg) sendChat(eg.dataset.eg);
-  });
 
   // ---- Wire up events ---------------------------------------------------
   clearSelectionEl.addEventListener("click", clearSelection);
