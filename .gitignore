@@ -3,6 +3,7 @@ __pycache__/
 *.pyc
 .pytest_cache/
 .env
+mercury_key.txt
 *.xlsx
 outputs/
 .playwright-mcp/

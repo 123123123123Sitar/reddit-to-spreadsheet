@@ -209,3 +209,17 @@ def test_subreddits_endpoint(client):
     assert "endometriosis" in data["themes"]["Women's health"]
     assert "pool" in data and "endometriosis" in data["pool"]
     assert "popular" in data and data["popular"]
+
+
+def test_suggest_endpoint_fallback(client, monkeypatch):
+    # RTS_FAKE=1 skips Mercury, so this exercises the static fallback offline.
+    monkeypatch.setenv("RTS_FAKE", "1")
+    resp = client.post("/api/suggest", json={"selected": ["endometriosis"]})
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert data["source"] == "fallback"
+    names = [s["name"].lower() for s in data["suggestions"]]
+    assert names, "expected related suggestions"
+    assert "endometriosis" not in names  # never suggest what's already selected
+    # endometriosis is women's health -> should surface other women's-health subs
+    assert any(n in names for n in ("pcos", "adenomyosis", "pmdd"))

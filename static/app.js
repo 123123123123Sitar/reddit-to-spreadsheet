@@ -20,9 +20,8 @@
   const searchInput      = $("search");
   const suggestList      = $("suggest-list");
   const combo            = searchInput.closest(".combo");
-  const themeChipsEl     = $("theme-chips");
   const suggestedEl      = $("suggested");
-  const suggestedLabel   = $("suggested-label");
+  const suggestedNote    = $("suggested-note");
   const trayList         = $("tray-list");
   const trayEmpty        = $("tray-empty");
   const selectedCountEl  = $("selected-count");
@@ -43,12 +42,8 @@
 
   // ---- State ------------------------------------------------------------
   const POOL = [];                   // every health subreddit (autocomplete)
-  let THEMES = {};                   // theme name -> [subreddit]
-  let POPULAR = [];                  // starter suggestions
   const poolByLower = new Map();     // lower -> canonical name
-  const subThemes = new Map();       // lower -> [theme name] (for relatedness)
   const selected = new Map();        // lower -> display name (source of truth)
-  let activeTheme = null;            // currently browsed theme, or null
 
   // ---- Date defaults ----------------------------------------------------
   function isoFromDate(d) {
@@ -101,7 +96,7 @@
   function syncAfterChange() {
     renderTray();
     selectedCountEl.textContent = String(selected.size);
-    renderSuggested();
+    scheduleSuggestions();
   }
 
   function renderTray() {
@@ -122,134 +117,82 @@
     clearSelectionEl.hidden = selected.size === 0;
   }
 
-  // ---- Load data --------------------------------------------------------
-  function loadData() {
+  // ---- Load the autocomplete pool ---------------------------------------
+  function loadPool() {
     fetch("/api/subreddits", { headers: { Accept: "application/json" } })
-      .then((res) => {
-        if (!res.ok) throw new Error("HTTP " + res.status);
-        return res.json();
-      })
+      .then((res) => (res.ok ? res.json() : Promise.reject(new Error("HTTP " + res.status))))
       .then((data) => {
-        THEMES = data.themes || {};
-        POPULAR = data.popular || [];
         (data.pool || []).forEach((n) => { POOL.push(n); poolByLower.set(n.toLowerCase(), n); });
-        // Build the subreddit -> themes index for relatedness.
-        Object.keys(THEMES).forEach((theme) => {
-          (THEMES[theme] || []).forEach((sub) => {
-            const l = sub.toLowerCase();
-            if (!poolByLower.has(l)) poolByLower.set(l, sub);
-            if (!subThemes.has(l)) subThemes.set(l, []);
-            subThemes.get(l).push(theme);
-          });
-        });
-        renderThemeChips();
-        renderSuggested();
       })
-      .catch((err) => {
+      .catch(() => { /* search-and-add still works without the pool */ });
+  }
+
+  // ---- Suggestions (Mercury 2, related to the current selection) --------
+  let suggestSeq = 0;
+  let suggestTimer = null;
+
+  function scheduleSuggestions() {
+    clearTimeout(suggestTimer);
+    suggestTimer = setTimeout(fetchSuggestions, 250);
+  }
+
+  function fetchSuggestions() {
+    const seq = ++suggestSeq;
+    suggestedEl.innerHTML = "";
+    suggestedEl.appendChild(el("p", { class: "loading", text: "Finding related communities…" }));
+    fetch("/api/suggest", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify({ selected: Array.from(selected.values()) }),
+    })
+      .then((res) => (res.ok ? res.json() : Promise.reject(new Error("HTTP " + res.status))))
+      .then((data) => { if (seq === suggestSeq) renderSuggested(data.suggestions || []); })
+      .catch(() => {
+        if (seq !== suggestSeq) return;
         suggestedEl.innerHTML = "";
         suggestedEl.appendChild(el("p", {
           class: "suggested-empty",
-          text: "Could not load communities (" + err.message +
-            "). You can still search for and add any subreddit above.",
+          text: "Couldn't load suggestions — search above to add any community.",
         }));
+        if (suggestedNote) suggestedNote.hidden = true;
       });
   }
 
-  // ---- Theme chips ------------------------------------------------------
-  function renderThemeChips() {
-    themeChipsEl.innerHTML = "";
-    Object.keys(THEMES).forEach((theme) => {
-      const chip = el("button", {
-        class: "theme-chip", text: theme,
-        attrs: { type: "button", "data-theme": theme, "aria-pressed": "false" },
-      });
-      chip.addEventListener("click", () => setActiveTheme(activeTheme === theme ? null : theme));
-      themeChipsEl.appendChild(chip);
-    });
-  }
-  function setActiveTheme(theme) {
-    activeTheme = theme;
-    themeChipsEl.querySelectorAll(".theme-chip").forEach((c) => {
-      const on = c.dataset.theme === theme;
-      c.classList.toggle("active", on);
-      c.setAttribute("aria-pressed", on ? "true" : "false");
-    });
-    renderSuggested();
+  function formatCount(n) {
+    if (n >= 1e6) return (n / 1e6).toFixed(1).replace(/\.0$/, "") + "m";
+    if (n >= 1e3) return Math.round(n / 1e3) + "k";
+    return String(n);
   }
 
-  // ---- Related-suggestion engine ---------------------------------------
-  function themesOf(lower) { return subThemes.get(lower) || []; }
-
-  // Communities that share a theme with something already selected, ranked by
-  // how many current picks they relate to.
-  function computeRelated() {
-    if (selected.size === 0) return [];
-    const activeThemes = new Set();
-    selected.forEach((_, lower) => themesOf(lower).forEach((t) => activeThemes.add(t)));
-
-    const candidates = new Map();  // lower -> canonical
-    activeThemes.forEach((t) => {
-      (THEMES[t] || []).forEach((sub) => {
-        const l = sub.toLowerCase();
-        if (!selected.has(l)) candidates.set(l, sub);
-      });
-    });
-
-    const score = (lower) => {
-      const ts = new Set(themesOf(lower));
-      let n = 0;
-      selected.forEach((_, sLower) => {
-        if (themesOf(sLower).some((t) => ts.has(t))) n += 1;
-      });
-      return n;
-    };
-
-    return Array.from(candidates.entries())
-      .map(([lower, name]) => ({ name, score: score(lower) }))
-      .sort((a, b) => b.score - a.score || a.name.toLowerCase().localeCompare(b.name.toLowerCase()))
-      .map((c) => c.name);
-  }
-
-  function renderSuggested() {
-    let names;
-    let label;
-
-    if (activeTheme) {
-      label = activeTheme;
-      names = (THEMES[activeTheme] || []).filter((n) => !selected.has(n.toLowerCase()));
-    } else if (selected.size > 0) {
-      names = computeRelated();
-      if (names.length) {
-        label = "Related to your selection";
-      } else {
-        label = "Popular communities";
-        names = POPULAR.filter((n) => !selected.has(n.toLowerCase()));
-      }
-    } else {
-      label = "Popular communities";
-      names = POPULAR.filter((n) => !selected.has(n.toLowerCase()));
-    }
-
-    suggestedLabel.textContent = label;
+  function renderSuggested(list) {
+    const items = (list || []).filter(
+      (s) => s && s.name && !selected.has(String(s.name).toLowerCase())
+    );
     suggestedEl.innerHTML = "";
 
-    if (!names.length) {
+    if (!items.length) {
       suggestedEl.appendChild(el("p", {
         class: "suggested-empty",
-        text: activeTheme
-          ? "All " + activeTheme + " communities are selected."
-          : "Everything suggested is already selected — search above to add more.",
+        text: "No more suggestions right now — search above to add any community.",
       }));
+      if (suggestedNote) suggestedNote.hidden = true;
       return;
     }
 
-    names.slice(0, SUGGEST_CAP).forEach((name) => {
+    let anyCount = false;
+    items.slice(0, SUGGEST_CAP).forEach((s) => {
+      const name = String(s.name);
       const pill = el("button", { class: "suggest-pill", attrs: { type: "button" } });
       pill.appendChild(el("span", { class: "plus", text: "+" }));
       pill.appendChild(el("span", { html: '<span class="r">r/</span>' + escapeHtml(name) }));
+      if (typeof s.posts === "number" && s.posts > 0) {
+        anyCount = true;
+        pill.appendChild(el("span", { class: "count", text: "~" + formatCount(s.posts) }));
+      }
       pill.addEventListener("click", () => addSel(name));
       suggestedEl.appendChild(pill);
     });
+    if (suggestedNote) suggestedNote.hidden = !anyCount;
   }
 
   function escapeHtml(s) {
@@ -527,5 +470,6 @@
   // ---- Init -------------------------------------------------------------
   syncCommentsCap();
   renderTray();
-  loadData();
+  loadPool();
+  fetchSuggestions();
 })();

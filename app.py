@@ -18,14 +18,126 @@ http://127.0.0.1:5000 with debug turned off.
 
 from __future__ import annotations
 
+import json
+import os
+import pathlib
 import time
 from datetime import datetime, timezone
 
+import requests
 from flask import Flask, Response, jsonify, request, send_from_directory
 
 import collector
 import spreadsheet
 import subreddits
+
+# --- Mercury 2 (Inception Labs) suggestion API ----------------------------- #
+MERCURY_URL = "https://api.inceptionlabs.ai/v1/chat/completions"
+MERCURY_MODEL = "mercury-2"
+# Cache suggestions per selection set (local single-process dev server).
+_SUGGEST_CACHE: dict[frozenset, dict] = {}
+
+
+def _mercury_key() -> str | None:
+    """Load the Mercury key from the env or a local key file (never committed)."""
+    key = os.environ.get("MERCURY_API_KEY")
+    if key:
+        return key.strip()
+    for p in (
+        pathlib.Path(__file__).resolve().parent / "mercury_key.txt",
+        pathlib.Path.home() / "mercury_key.txt",
+    ):
+        try:
+            if p.is_file():
+                return p.read_text(encoding="utf-8").strip()
+        except OSError:
+            pass
+    return None
+
+
+def _mercury_suggest(selected: list[str]) -> list[dict] | None:
+    """Ask Mercury 2 for related health communities. None on skip/failure."""
+    if os.environ.get("RTS_FAKE") == "1":
+        return None  # offline / tests -> use the static fallback
+    key = _mercury_key()
+    if not key:
+        return None
+
+    if selected:
+        ask = (
+            "The user selected these health subreddits: " + ", ".join(selected) +
+            ". Suggest 14 closely related health or patient-support subreddits in the "
+            "same condition domains, excluding the ones already selected."
+        )
+    else:
+        ask = (
+            "Suggest 14 popular health / patient-support subreddits spanning common "
+            "conditions (women's health, cancer, autoimmune, diabetes and endocrine, "
+            "digestive, chronic pain, respiratory, mental health)."
+        )
+    prompt = (
+        ask + " Use only real subreddits. For each, give the exact subreddit name "
+        "(no r/ prefix) and approx_posts, a rough integer estimate of how many posts "
+        'the subreddit has. Respond as JSON: '
+        '{"suggestions":[{"name":"...","approx_posts":12345}]}'
+    )
+    try:
+        resp = requests.post(
+            MERCURY_URL,
+            timeout=20,
+            headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+            json={
+                "model": MERCURY_MODEL,
+                "temperature": 0.3,
+                "response_format": {"type": "json_object"},
+                "messages": [
+                    {"role": "system", "content": "You know Reddit health and patient-support communities. Return only real subreddits, as JSON."},
+                    {"role": "user", "content": prompt},
+                ],
+            },
+        )
+        resp.raise_for_status()
+        content = resp.json()["choices"][0]["message"]["content"]
+        data = json.loads(content)
+    except Exception:  # noqa: BLE001 - any failure just falls back
+        app.logger.exception("mercury suggest failed")
+        return None
+
+    out: list[dict] = []
+    for item in data.get("suggestions", []) if isinstance(data, dict) else []:
+        name = str(item.get("name", "")).strip().lstrip("/")
+        if name.lower().startswith("r/"):
+            name = name[2:]
+        name = name.strip("/").strip()
+        if not name:
+            continue
+        posts = item.get("approx_posts")
+        posts = int(posts) if isinstance(posts, (int, float)) and posts > 0 else None
+        out.append({"name": name, "posts": posts})
+    return out or None
+
+
+def _fallback_suggest(selected_lower: set[str]) -> list[dict]:
+    """Static theme-based suggestions when Mercury is unavailable (no counts)."""
+    sub_themes: dict[str, list[str]] = {}
+    for theme, subs in subreddits.THEMES.items():
+        for s in subs:
+            sub_themes.setdefault(s.lower(), []).append(theme)
+
+    if selected_lower:
+        active = {t for s in selected_lower for t in sub_themes.get(s, [])}
+        names, seen = [], set()
+        for theme, subs in subreddits.THEMES.items():
+            if theme in active:
+                for s in subs:
+                    if s.lower() not in selected_lower and s.lower() not in seen:
+                        seen.add(s.lower())
+                        names.append(s)
+        if not names:
+            names = [p for p in subreddits.POPULAR if p.lower() not in selected_lower]
+    else:
+        names = list(subreddits.POPULAR)
+    return [{"name": n, "posts": None} for n in names]
 
 # XLSX MIME type used both for the response Content-Type and by the tests.
 XLSX_MIMETYPE = (
@@ -132,6 +244,49 @@ def api_subreddits():
             "popular": subreddits.POPULAR,
         }
     )
+
+
+@app.post("/api/suggest")
+def api_suggest():
+    """Suggest related health communities (Mercury 2, with a static fallback)."""
+    payload = request.get_json(silent=True) or {}
+    raw = payload.get("selected")
+    selected, seen = [], set()
+    for x in raw if isinstance(raw, list) else []:
+        if not isinstance(x, str):
+            continue
+        name = x.strip().lstrip("/")
+        if name.lower().startswith("r/"):
+            name = name[2:]
+        name = name.strip("/").strip()
+        if name and name.lower() not in seen:
+            seen.add(name.lower())
+            selected.append(name)
+
+    cache_key = frozenset(seen)
+    if cache_key in _SUGGEST_CACHE:
+        return jsonify(_SUGGEST_CACHE[cache_key])
+
+    suggestions = _mercury_suggest(selected)
+    source = "mercury"
+    if not suggestions:
+        suggestions = _fallback_suggest(seen)
+        source = "fallback"
+
+    # Never suggest something already selected; de-dupe and cap.
+    out, picked = [], set()
+    for s in suggestions:
+        low = s["name"].lower()
+        if low in seen or low in picked:
+            continue
+        picked.add(low)
+        out.append(s)
+        if len(out) >= 16:
+            break
+
+    result = {"suggestions": out, "source": source}
+    _SUGGEST_CACHE[cache_key] = result
+    return jsonify(result)
 
 
 @app.post("/api/collect")

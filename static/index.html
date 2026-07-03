@@ -69,12 +69,11 @@
                 </div>
               </div>
 
-              <!-- Browse by condition theme (rendered from /api/subreddits). -->
-              <div class="themes" id="theme-chips" aria-label="Condition themes"></div>
-
-              <!-- Dynamic suggestions: starter set, a theme, or communities
-                   related to what's already selected. -->
-              <p class="suggested-label" id="suggested-label">Popular communities</p>
+              <!-- Suggestions from Mercury 2, related to what's selected. -->
+              <div class="suggested-head">
+                <p class="suggested-label" id="suggested-label">Suggested</p>
+                <span class="suggested-note" id="suggested-note" hidden>~ approx. posts</span>
+              </div>
               <div class="suggested" id="suggested" aria-live="polite">
                 <p class="loading" id="suggested-loading">Loading communities…</p>
               </div>
