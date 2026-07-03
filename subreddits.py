@@ -1,134 +1,80 @@
-"""Curated starter subreddits for the picker UI.
+"""Health-focused subreddit data for the picker.
 
-These are just suggestions to seed the search bar / checkboxes. The UI also
-lets the user type any custom subreddit name, so this list does not need to be
-exhaustive.
+The app is scoped to patient / health communities. Subreddits are organized
+into condition *themes* (e.g. women's health, cancer, autoimmune). Themes serve
+two jobs:
+
+  1. Browse-by-theme chips in the UI (replacing the old category dropdowns).
+  2. Relatedness: when a user selects a subreddit, the UI suggests other members
+     of the same theme(s) — pick a women's-health community and it surfaces other
+     women's-health communities, and so on.
+
+A subreddit may belong to more than one theme (PCOS is both women's health and
+endocrine), which is what makes the "you might also want" suggestions useful.
 
 Public interface:
-    CATEGORIES : dict[str, list[str]]  -- subreddits grouped by theme
-    ALL        : list[str]             -- sorted, de-duplicated set of every name
+    THEMES  : dict[str, list[str]]  -- condition theme -> subreddits
+    POOL    : list[str]             -- every health subreddit (autocomplete)
+    POPULAR : list[str]             -- starter suggestions before any selection
 """
 
-CATEGORIES: dict[str, list[str]] = {
-    "Health": [
-        "endometriosis",
-        "ENDO",
-        "PCOS",
-        "BreastCancer",
-        "diabetes",
-        "Fibromyalgia",
-        "ChronicPain",
-        "ChronicIllness",
-        "migraine",
-        "ibs",
-        "Crohns",
-        "Hypothyroidism",
-        "cancer",
-        "lupus",
-        "Asthma",
+THEMES: dict[str, list[str]] = {
+    "Women's health": [
+        "endometriosis", "ENDO", "PCOS", "adenomyosis", "PMDD", "Fibroids",
+        "Menopause", "Perimenopause", "TryingForABaby", "infertility",
+        "birthcontrol", "WomensHealth", "Periods", "vulvodynia",
+        "Interstitialcystitis",
+    ],
+    "Cancer": [
+        "BreastCancer", "cancer", "lymphoma", "leukemia", "ovariancancer",
+        "ColonCancer", "testicularcancer", "braincancer", "ProstateCancer",
+        "thyroidcancer", "cancersurvivors",
+    ],
+    "Autoimmune & rheumatic": [
+        "lupus", "rheumatoid", "MultipleSclerosis", "Hashimotos", "Sjogrens",
+        "psoriasis", "PsoriaticArthritis", "ankylosingspondylitis",
+        "Scleroderma", "MyastheniaGravis", "Crohns", "UlcerativeColitis",
+        "Celiac",
+    ],
+    "Diabetes & endocrine": [
+        "diabetes", "Type1Diabetes", "diabetes_t2", "Hypothyroidism",
+        "hyperthyroidism", "thyroidhealth", "Hashimotos", "PCOS",
+        "insulinresistance",
+    ],
+    "Digestive & GI": [
+        "ibs", "Crohns", "UlcerativeColitis", "Celiac", "IBD", "GERD",
+        "gastroparesis", "gallbladders", "Gastritis", "Constipation",
+    ],
+    "Chronic pain & neurological": [
+        "ChronicPain", "Fibromyalgia", "migraine", "ChronicIllness",
+        "ehlersdanlos", "POTS", "epilepsy", "ClusterHeadaches", "CRPS",
+        "backpain", "Sciatica",
+    ],
+    "Respiratory": [
+        "Asthma", "COPD", "CysticFibrosis", "sleepapnea",
     ],
     "Mental health": [
-        "mentalhealth",
-        "depression",
-        "Anxiety",
-        "bipolar",
-        "ptsd",
-        "OCD",
-        "ADHD",
-        "autism",
-        "BPD",
-        "socialanxiety",
-    ],
-    "Tech": [
-        "programming",
-        "technology",
-        "learnprogramming",
-        "Python",
-        "javascript",
-        "webdev",
-        "sysadmin",
-        "MachineLearning",
-        "cybersecurity",
-        "datascience",
-        "linux",
-        "gadgets",
-    ],
-    "Finance": [
-        "personalfinance",
-        "investing",
-        "financialindependence",
-        "stocks",
-        "wallstreetbets",
-        "CryptoCurrency",
-        "Bogleheads",
-        "financialplanning",
-        "povertyfinance",
-        "StockMarket",
-    ],
-    "General": [
-        "AskReddit",
-        "news",
-        "worldnews",
-        "todayilearned",
-        "explainlikeimfive",
-        "LifeProTips",
-        "science",
-        "books",
-        "movies",
-        "gaming",
+        "mentalhealth", "depression", "Anxiety", "bipolar", "BPD", "ptsd",
+        "CPTSD", "OCD", "ADHD", "autism", "EatingDisorders", "SuicideWatch",
     ],
 }
 
-# Sorted, de-duplicated set of every curated subreddit name.
-ALL: list[str] = sorted({name for names in CATEGORIES.values() for name in names})
+# Every distinct health subreddit (case-insensitive de-dupe), for autocomplete.
+def _dedupe(names):
+    seen, out = set(), []
+    for n in names:
+        if n.lower() not in seen:
+            seen.add(n.lower())
+            out.append(n)
+    return out
 
-# A broader pool of popular subreddits used ONLY to power the search-box
-# autocomplete (matched client-side). It is intentionally larger than the
-# curated checkbox groups above; any name not here can still be added by
-# typing it in full. Not exhaustive by design.
-_SUGGEST_EXTRA: list[str] = [
-    # general / default front page
-    "AskReddit", "news", "worldnews", "todayilearned", "explainlikeimfive",
-    "LifeProTips", "science", "askscience", "books", "movies", "television",
-    "Music", "gaming", "funny", "pics", "aww", "food", "DIY", "history",
-    "Futurology", "space", "dataisbeautiful", "Showerthoughts", "NoStupidQuestions",
-    "OutOfTheLoop", "YouShouldKnow", "productivity", "getdisciplined",
-    # relationships / advice
-    "relationship_advice", "relationships", "AmItheAsshole", "tifu",
-    "offmychest", "confession", "CasualConversation", "decidingtobebetter",
-    # tech
-    "programming", "learnprogramming", "Python", "javascript", "typescript",
-    "webdev", "rust", "golang", "java", "cpp", "csharp", "reactjs", "django",
-    "flask", "node", "linux", "sysadmin", "devops", "docker", "kubernetes",
-    "aws", "MachineLearning", "artificial", "LocalLLaMA", "datascience",
-    "dataengineering", "cybersecurity", "netsec", "selfhosted", "homelab",
-    "buildapc", "pcmasterrace", "Android", "apple", "iphone", "technology",
-    "gadgets", "webdesign", "ExperiencedDevs", "cscareerquestions",
-    # health / medical
-    "endometriosis", "ENDO", "PCOS", "BreastCancer", "cancer", "diabetes",
-    "Type1Diabetes", "diabetes_t2", "Fibromyalgia", "ChronicPain",
-    "ChronicIllness", "migraine", "ibs", "Crohns", "UlcerativeColitis",
-    "Hypothyroidism", "thyroidhealth", "lupus", "Asthma", "Celiac",
-    "ehlersdanlos", "POTS", "epilepsy", "MultipleSclerosis", "psoriasis",
-    "eczema", "AskDocs", "medicine", "nursing", "Health", "WomensHealth",
-    "TryingForABaby", "infertility", "Menopause", "birthcontrol",
-    # mental health
-    "mentalhealth", "depression", "Anxiety", "bipolar", "BPD", "ptsd",
-    "CPTSD", "OCD", "ADHD", "autism", "aspergers", "socialanxiety",
-    "SuicideWatch", "therapy", "getting_over_it", "mentalillness",
-    # fitness / diet
-    "Fitness", "loseit", "gainit", "bodyweightfitness", "running", "xxfitness",
-    "nutrition", "keto", "intermittentfasting", "vegan", "EatCheapAndHealthy",
-    "MealPrepSunday", "GYM", "flexibility",
-    # finance
-    "personalfinance", "financialindependence", "investing", "stocks",
-    "wallstreetbets", "Bogleheads", "financialplanning", "povertyfinance",
-    "StockMarket", "CryptoCurrency", "Bitcoin", "ethereum", "Frugal",
-    "realestateinvesting",
-]
-
-# Sorted, de-duplicated autocomplete pool (curated groups + the extras above).
-SUGGEST_POOL: list[str] = sorted(
-    {name for names in CATEGORIES.values() for name in names} | set(_SUGGEST_EXTRA),
-    key=str.lower,
+POOL: list[str] = sorted(
+    _dedupe(n for names in THEMES.values() for n in names), key=str.lower
 )
+
+# A spread of common communities shown before the user has selected anything.
+POPULAR: list[str] = [
+    "endometriosis", "PCOS", "BreastCancer", "diabetes", "lupus",
+    "ChronicPain", "Fibromyalgia", "ibs", "Crohns", "Asthma", "migraine",
+    "Hypothyroidism",
+]

@@ -1,15 +1,15 @@
 /*
   reddit-to-spreadsheet — UI logic (vanilla JS, no frameworks).
 
-    - Load subreddit categories + a wider autocomplete pool from
-      GET /api/subreddits.
-    - As the user types, show a live suggestions dropdown (pool matches plus an
-      "add exactly what I typed" row) — no Enter required.
-    - Keep a single source of truth for the selection and mirror it into the
-      category checkboxes and a side "Selected" tray.
-    - Quick-set preset buttons for the per-subreddit caps.
-    - POST the request to /api/collect, stream back the .xlsx, and report how
-      long the whole thing took.
+  Health-focused picker:
+    - Load condition themes + an autocomplete pool + starter "popular" list.
+    - Search box shows live suggestions as you type (no Enter needed).
+    - Theme chips browse communities by condition; the suggested panel also
+      recommends communities RELATED to whatever is already selected (pick a
+      women's-health community and it surfaces other women's-health ones).
+    - A single selection set feeds a side "Selected" tray.
+    - Quick-set presets for the caps and the date window.
+    - POST to /api/collect, stream back the .xlsx, and report the run time.
 */
 (function () {
   "use strict";
@@ -20,8 +20,9 @@
   const searchInput      = $("search");
   const suggestList      = $("suggest-list");
   const combo            = searchInput.closest(".combo");
-  const categoriesEl     = $("categories");
-  const categoriesLoad   = $("categories-loading");
+  const themeChipsEl     = $("theme-chips");
+  const suggestedEl      = $("suggested");
+  const suggestedLabel   = $("suggested-label");
   const trayList         = $("tray-list");
   const trayEmpty        = $("tray-empty");
   const selectedCountEl  = $("selected-count");
@@ -38,18 +39,24 @@
   const statusEl         = $("status");
   const errorEl          = $("error");
 
+  const SUGGEST_CAP = 16;   // most pills to show at once
+
   // ---- State ------------------------------------------------------------
-  const POOL = [];                    // autocomplete pool (from the API)
-  const curatedByLower = new Map();   // lower -> category checkbox element
-  const selected = new Map();         // lower -> display name (source of truth)
+  const POOL = [];                   // every health subreddit (autocomplete)
+  let THEMES = {};                   // theme name -> [subreddit]
+  let POPULAR = [];                  // starter suggestions
+  const poolByLower = new Map();     // lower -> canonical name
+  const subThemes = new Map();       // lower -> [theme name] (for relatedness)
+  const selected = new Map();        // lower -> display name (source of truth)
+  let activeTheme = null;            // currently browsed theme, or null
 
   // ---- Date defaults ----------------------------------------------------
-  function isoToday() {
-    const d = new Date();
+  function isoFromDate(d) {
     const mm = String(d.getMonth() + 1).padStart(2, "0");
     const dd = String(d.getDate()).padStart(2, "0");
     return `${d.getFullYear()}-${mm}-${dd}`;
   }
+  function isoToday() { return isoFromDate(new Date()); }
   startDateEl.value = "2018-02-07";
   endDateEl.value   = isoToday();
   endDateEl.max     = isoToday();
@@ -60,12 +67,12 @@
     if (opts) {
       if (opts.class) node.className = opts.class;
       if (opts.text != null) node.textContent = opts.text;
+      if (opts.html != null) node.innerHTML = opts.html;
       if (opts.attrs) for (const k in opts.attrs) node.setAttribute(k, opts.attrs[k]);
     }
     return node;
   }
 
-  // Accept "r/foo", "/r/foo", "foo"; keep only valid subreddit characters.
   function sanitizeName(raw) {
     return raw
       .trim()
@@ -80,137 +87,191 @@
     if (!clean) return;
     const lower = clean.toLowerCase();
     if (!selected.has(lower)) {
-      // Prefer the curated casing if we know it.
-      const display = curatedByLower.has(lower)
-        ? curatedByLower.get(lower).value
-        : clean;
-      selected.set(lower, display);
+      selected.set(lower, poolByLower.get(lower) || clean); // prefer canonical casing
       syncAfterChange();
     }
   }
   function removeSel(lower) {
     if (selected.delete(lower)) syncAfterChange();
   }
-  function toggleSel(name) {
-    const lower = sanitizeName(name).toLowerCase();
-    if (selected.has(lower)) removeSel(lower);
-    else addSel(name);
-  }
   function clearSelection() {
     selected.clear();
     syncAfterChange();
   }
-
   function syncAfterChange() {
-    // Mirror the selection into the category checkboxes.
-    curatedByLower.forEach((cb, lower) => { cb.checked = selected.has(lower); });
     renderTray();
     selectedCountEl.textContent = String(selected.size);
+    renderSuggested();
   }
 
   function renderTray() {
     trayList.innerHTML = "";
-    const items = Array.from(selected.entries())
-      .sort((a, b) => a[1].toLowerCase().localeCompare(b[1].toLowerCase()));
-
-    items.forEach(([lower, name]) => {
-      const li = el("li", { class: "tray-item" });
-      li.appendChild(el("span", { class: "tray-name", text: "r/" + name }));
-      const remove = el("button", {
-        attrs: { type: "button", "aria-label": "Remove r/" + name },
-        text: "×",
+    Array.from(selected.entries())
+      .sort((a, b) => a[1].toLowerCase().localeCompare(b[1].toLowerCase()))
+      .forEach(([lower, name]) => {
+        const li = el("li", { class: "tray-item" });
+        li.appendChild(el("span", { class: "tray-name", text: "r/" + name }));
+        const remove = el("button", {
+          attrs: { type: "button", "aria-label": "Remove r/" + name }, text: "×",
+        });
+        remove.addEventListener("click", () => removeSel(lower));
+        li.appendChild(remove);
+        trayList.appendChild(li);
       });
-      remove.addEventListener("click", () => removeSel(lower));
-      li.appendChild(remove);
-      trayList.appendChild(li);
-    });
-
     trayEmpty.hidden = selected.size > 0;
     clearSelectionEl.hidden = selected.size === 0;
   }
 
-  // ---- Load + render categories ----------------------------------------
-  function loadCategories() {
+  // ---- Load data --------------------------------------------------------
+  function loadData() {
     fetch("/api/subreddits", { headers: { Accept: "application/json" } })
       .then((res) => {
         if (!res.ok) throw new Error("HTTP " + res.status);
         return res.json();
       })
       .then((data) => {
-        (data.pool || []).forEach((n) => POOL.push(n));
-        renderCategories(data.categories || {});
+        THEMES = data.themes || {};
+        POPULAR = data.popular || [];
+        (data.pool || []).forEach((n) => { POOL.push(n); poolByLower.set(n.toLowerCase(), n); });
+        // Build the subreddit -> themes index for relatedness.
+        Object.keys(THEMES).forEach((theme) => {
+          (THEMES[theme] || []).forEach((sub) => {
+            const l = sub.toLowerCase();
+            if (!poolByLower.has(l)) poolByLower.set(l, sub);
+            if (!subThemes.has(l)) subThemes.set(l, []);
+            subThemes.get(l).push(theme);
+          });
+        });
+        renderThemeChips();
+        renderSuggested();
       })
       .catch((err) => {
-        categoriesLoad.textContent =
-          "Could not load the subreddit list (" + err.message +
-          "). You can still search for and add any subreddit above.";
+        suggestedEl.innerHTML = "";
+        suggestedEl.appendChild(el("p", {
+          class: "suggested-empty",
+          text: "Could not load communities (" + err.message +
+            "). You can still search for and add any subreddit above.",
+        }));
       });
   }
 
-  function renderCategories(categories) {
-    categoriesLoad.remove();
-    const names = Object.keys(categories);
+  // ---- Theme chips ------------------------------------------------------
+  function renderThemeChips() {
+    themeChipsEl.innerHTML = "";
+    Object.keys(THEMES).forEach((theme) => {
+      const chip = el("button", {
+        class: "theme-chip", text: theme,
+        attrs: { type: "button", "data-theme": theme, "aria-pressed": "false" },
+      });
+      chip.addEventListener("click", () => setActiveTheme(activeTheme === theme ? null : theme));
+      themeChipsEl.appendChild(chip);
+    });
+  }
+  function setActiveTheme(theme) {
+    activeTheme = theme;
+    themeChipsEl.querySelectorAll(".theme-chip").forEach((c) => {
+      const on = c.dataset.theme === theme;
+      c.classList.toggle("active", on);
+      c.setAttribute("aria-pressed", on ? "true" : "false");
+    });
+    renderSuggested();
+  }
+
+  // ---- Related-suggestion engine ---------------------------------------
+  function themesOf(lower) { return subThemes.get(lower) || []; }
+
+  // Communities that share a theme with something already selected, ranked by
+  // how many current picks they relate to.
+  function computeRelated() {
+    if (selected.size === 0) return [];
+    const activeThemes = new Set();
+    selected.forEach((_, lower) => themesOf(lower).forEach((t) => activeThemes.add(t)));
+
+    const candidates = new Map();  // lower -> canonical
+    activeThemes.forEach((t) => {
+      (THEMES[t] || []).forEach((sub) => {
+        const l = sub.toLowerCase();
+        if (!selected.has(l)) candidates.set(l, sub);
+      });
+    });
+
+    const score = (lower) => {
+      const ts = new Set(themesOf(lower));
+      let n = 0;
+      selected.forEach((_, sLower) => {
+        if (themesOf(sLower).some((t) => ts.has(t))) n += 1;
+      });
+      return n;
+    };
+
+    return Array.from(candidates.entries())
+      .map(([lower, name]) => ({ name, score: score(lower) }))
+      .sort((a, b) => b.score - a.score || a.name.toLowerCase().localeCompare(b.name.toLowerCase()))
+      .map((c) => c.name);
+  }
+
+  function renderSuggested() {
+    let names;
+    let label;
+
+    if (activeTheme) {
+      label = activeTheme;
+      names = (THEMES[activeTheme] || []).filter((n) => !selected.has(n.toLowerCase()));
+    } else if (selected.size > 0) {
+      names = computeRelated();
+      if (names.length) {
+        label = "Related to your selection";
+      } else {
+        label = "Popular communities";
+        names = POPULAR.filter((n) => !selected.has(n.toLowerCase()));
+      }
+    } else {
+      label = "Popular communities";
+      names = POPULAR.filter((n) => !selected.has(n.toLowerCase()));
+    }
+
+    suggestedLabel.textContent = label;
+    suggestedEl.innerHTML = "";
 
     if (!names.length) {
-      categoriesEl.appendChild(
-        el("p", { class: "loading", text: "No suggested subreddits; search above to add your own." })
-      );
+      suggestedEl.appendChild(el("p", {
+        class: "suggested-empty",
+        text: activeTheme
+          ? "All " + activeTheme + " communities are selected."
+          : "Everything suggested is already selected — search above to add more.",
+      }));
       return;
     }
 
-    names.forEach((catName, idx) => {
-      const subs = categories[catName] || [];
-      const group = el("div", { class: "category" });
-      if (idx > 0) group.classList.add("collapsed");   // expand only the first
-
-      const header = el("button", { class: "category-header", attrs: { type: "button" } });
-      header.setAttribute("aria-expanded", idx === 0 ? "true" : "false");
-      header.appendChild(el("span", { class: "category-caret", text: "▼" }));
-      header.appendChild(el("span", { class: "category-name", text: catName }));
-      header.appendChild(el("span", { class: "category-badge", text: String(subs.length) }));
-      header.addEventListener("click", () => {
-        const collapsed = group.classList.toggle("collapsed");
-        header.setAttribute("aria-expanded", collapsed ? "false" : "true");
-      });
-      group.appendChild(header);
-
-      const body = el("div", { class: "category-body" });
-      subs.forEach((sub) => {
-        const lower = sub.toLowerCase();
-        const label = el("label", { class: "sub-item" });
-        const cb = el("input", { attrs: { type: "checkbox", value: sub } });
-        cb.checked = selected.has(lower);
-        cb.addEventListener("change", () => toggleSel(sub));
-        label.appendChild(cb);
-        label.appendChild(el("span", { class: "sub-name", text: sub }));
-        body.appendChild(label);
-        if (!curatedByLower.has(lower)) curatedByLower.set(lower, cb);
-      });
-      group.appendChild(body);
-      categoriesEl.appendChild(group);
+    names.slice(0, SUGGEST_CAP).forEach((name) => {
+      const pill = el("button", { class: "suggest-pill", attrs: { type: "button" } });
+      pill.appendChild(el("span", { class: "plus", text: "+" }));
+      pill.appendChild(el("span", { html: '<span class="r">r/</span>' + escapeHtml(name) }));
+      pill.addEventListener("click", () => addSel(name));
+      suggestedEl.appendChild(pill);
     });
   }
 
-  // ---- Suggestions dropdown --------------------------------------------
-  let matches = [];    // [{ name, add }]
+  function escapeHtml(s) {
+    return s.replace(/[&<>"']/g, (c) =>
+      ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  }
+
+  // ---- Search autocomplete dropdown ------------------------------------
+  let matches = [];
   let activeIdx = -1;
 
   function computeMatches(q) {
     const clean = q.trim();
     const ql = clean.toLowerCase();
     if (!ql) return [];
-
-    const starts = [];
-    const contains = [];
+    const starts = [], contains = [];
     for (const name of POOL) {
       const nl = name.toLowerCase();
       if (nl.startsWith(ql)) starts.push(name);
       else if (nl.indexOf(ql) !== -1) contains.push(name);
     }
     const pooled = starts.concat(contains).slice(0, 8).map((name) => ({ name, add: false }));
-
-    // Always let the user add exactly what they typed (unless it's already a
-    // pool entry with that exact name).
     const typed = sanitizeName(clean);
     const exactInPool = POOL.some((n) => n.toLowerCase() === ql);
     if (typed && !exactInPool) pooled.unshift({ name: typed, add: true });
@@ -221,11 +282,9 @@
     matches = computeMatches(q);
     activeIdx = -1;
     if (!matches.length) { hideSuggest(); return; }
-
     suggestList.innerHTML = "";
     matches.forEach((m, i) => {
       const li = el("li", { class: "suggest-item", attrs: { role: "option", "data-idx": String(i) } });
-      const already = !m.add && selected.has(m.name.toLowerCase());
       if (m.add) {
         li.classList.add("suggest-add");
         li.appendChild(el("span", { class: "suggest-plus", text: "+" }));
@@ -233,7 +292,9 @@
       } else {
         li.appendChild(el("span", { class: "suggest-r", text: "r/" }));
         li.appendChild(el("span", { text: m.name }));
-        if (already) li.appendChild(el("span", { class: "suggest-check", text: "✓ added" }));
+        if (selected.has(m.name.toLowerCase())) {
+          li.appendChild(el("span", { class: "suggest-check", text: "✓ added" }));
+        }
       }
       li.addEventListener("mousedown", (e) => { e.preventDefault(); chooseSuggest(i); });
       suggestList.appendChild(li);
@@ -250,7 +311,6 @@
     hideSuggest();
     searchInput.focus();
   }
-
   function hideSuggest() {
     suggestList.hidden = true;
     suggestList.innerHTML = "";
@@ -258,16 +318,12 @@
     matches = [];
     activeIdx = -1;
   }
-
   function highlightActive() {
-    Array.from(suggestList.children).forEach((li, i) => {
-      li.classList.toggle("active", i === activeIdx);
-    });
+    Array.from(suggestList.children).forEach((li, i) => li.classList.toggle("active", i === activeIdx));
     if (activeIdx >= 0 && suggestList.children[activeIdx]) {
       suggestList.children[activeIdx].scrollIntoView({ block: "nearest" });
     }
   }
-
   function moveActive(delta) {
     if (!matches.length) return;
     activeIdx = (activeIdx + delta + matches.length) % matches.length;
@@ -282,23 +338,12 @@
     else if (e.key === "Enter") {
       e.preventDefault();
       if (matches.length) chooseSuggest(activeIdx >= 0 ? activeIdx : 0);
-    } else if (e.key === "Escape") {
-      hideSuggest();
-    }
+    } else if (e.key === "Escape") { hideSuggest(); }
   });
-  document.addEventListener("click", (e) => {
-    if (!combo.contains(e.target)) hideSuggest();
-  });
+  document.addEventListener("click", (e) => { if (!combo.contains(e.target)) hideSuggest(); });
 
-  // ---- Cap preset buttons ----------------------------------------------
-  // Date presets resolve to a YYYY-MM-DD value at click time. "Earliest" is
-  // Reddit's launch date (the practical floor for pullpush/Pushshift data).
-  const REDDIT_EPOCH = "2005-06-23";
-  function isoFromDate(d) {
-    const mm = String(d.getMonth() + 1).padStart(2, "0");
-    const dd = String(d.getDate()).padStart(2, "0");
-    return `${d.getFullYear()}-${mm}-${dd}`;
-  }
+  // ---- Cap + date presets ----------------------------------------------
+  const REDDIT_EPOCH = "2005-06-23";  // Reddit launch — practical data floor
   function isoAgo(years) {
     const d = new Date();
     d.setFullYear(d.getFullYear() - years);
@@ -313,7 +358,6 @@
       default:         return "";
     }
   }
-  // A preset button carries either data-val (numeric caps) or data-preset (dates).
   function presetValue(btn) {
     return btn.dataset.val != null ? btn.dataset.val : resolveDatePreset(btn.dataset.preset);
   }
@@ -331,12 +375,10 @@
         markActivePreset(wrap, target);
       });
     });
-    // Manual edits clear the active preset unless they land on one.
     target.addEventListener("input", () => markActivePreset(wrap, target));
     markActivePreset(wrap, target);
   });
 
-  // Disable the comments cap (and its presets) when comments are excluded.
   function syncCommentsCap() {
     const on = includeCommentsEl.checked;
     maxCommentsEl.disabled = !on;
@@ -356,7 +398,6 @@
   function hideStatus() { statusEl.hidden = true; statusEl.textContent = ""; }
   function showError(msg) { errorEl.textContent = msg; errorEl.hidden = false; }
   function hideError() { errorEl.hidden = true; errorEl.textContent = ""; }
-
   function setBusy(busy) {
     generateBtn.disabled = busy;
     spinnerEl.hidden = !busy;
@@ -371,7 +412,6 @@
     m = /filename=["']?([^"';]+)["']?/i.exec(header);
     return (m && m[1]) ? m[1] : fallback;
   }
-
   function triggerDownload(blob, filename) {
     const url = URL.createObjectURL(blob);
     const a = el("a", { attrs: { href: url, download: filename } });
@@ -385,7 +425,7 @@
   function buildPayload() {
     const toInt = (v, def) => {
       const n = parseInt(v, 10);
-      return Number.isFinite(n) && n >= 1 ? n : def;  // server requires 1..100000
+      return Number.isFinite(n) && n >= 1 ? n : def;
     };
     return {
       subreddits: Array.from(selected.values()),
@@ -402,9 +442,8 @@
   function onGenerate() {
     hideError();
     hideStatus();
-
     if (selected.size === 0) {
-      showError("Select at least one subreddit — search above or pick from the list.");
+      showError("Select at least one community — search above or pick a suggestion.");
       return;
     }
     if (!startDateEl.value || !endDateEl.value) {
@@ -440,9 +479,7 @@
             throw new Error(t || ("Request failed (HTTP " + res.status + ")."));
           });
         }
-        const fname = filenameFromDisposition(
-          res.headers.get("Content-Disposition"), "reddit_export.xlsx"
-        );
+        const fname = filenameFromDisposition(res.headers.get("Content-Disposition"), "reddit_export.xlsx");
         const num = (h) => { const n = parseInt(res.headers.get(h), 10); return Number.isFinite(n) ? n : 0; };
         const counts = {
           posts: num("X-Collect-Posts"),
@@ -457,25 +494,21 @@
         const secs = ((performance.now() - t0) / 1000).toFixed(1);
         triggerDownload(out.blob, out.fname);
         const c = out.counts;
-        console.log(
-          "[reddit-to-spreadsheet] workflow completed in " + secs + "s",
-          { posts: c.posts, comments: c.comments, errors: c.errors, serverSeconds: c.serverSecs }
-        );
+        console.log("[reddit-to-spreadsheet] workflow completed in " + secs + "s",
+          { posts: c.posts, comments: c.comments, errors: c.errors, serverSeconds: c.serverSecs });
         if (c.posts + c.comments === 0) {
           showStatus(
             "Finished in " + secs + "s, but no posts or comments matched that window, so " +
               out.fname + " is empty. " +
               (c.errors
                 ? "pullpush returned " + c.errors + " error(s) — it may be down right now; try again shortly."
-                : "Try a wider date range or different subreddits."),
+                : "Try a wider date range or different communities."),
             "warn"
           );
         } else {
           let msg = "Done in " + secs + "s — exported " + c.posts + " posts and " +
             c.comments + " comments to " + out.fname + ".";
-          if (c.errors) {
-            msg += " Note: pullpush returned " + c.errors + " error(s), so some data may be missing.";
-          }
+          if (c.errors) msg += " Note: pullpush returned " + c.errors + " error(s), so some data may be missing.";
           showStatus(msg, c.errors ? "warn" : "ok");
         }
       })
@@ -494,5 +527,5 @@
   // ---- Init -------------------------------------------------------------
   syncCommentsCap();
   renderTray();
-  loadCategories();
+  loadData();
 })();

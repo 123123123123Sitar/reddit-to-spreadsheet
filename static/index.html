@@ -19,11 +19,12 @@
 
   <header class="hero">
     <div class="wrap">
-      <p class="eyebrow">Reddit data &rarr; .xlsx</p>
-      <h1 class="hero-title">Turn a subreddit<br />into a spreadsheet.</h1>
+      <p class="eyebrow">Health communities &rarr; .xlsx</p>
+      <h1 class="hero-title">Turn a patient<br />community into data.</h1>
       <p class="hero-lede">
-        Choose the communities and a date window. Get back every post and
+        Pick health subreddits and a date window. Get back every post and
         comment as clean, columned rows &mdash; collected from pullpush.io.
+        Pick one condition and we&rsquo;ll suggest related ones.
       </p>
       <!-- Signature: a formula that literally describes what the tool does. -->
       <div class="formula" role="img"
@@ -50,13 +51,13 @@
             <div class="source-main">
               <!-- Search + add: suggestions appear as you type, click to add. -->
               <div class="field search-field">
-                <label class="visually-hidden" for="search">Search or add a subreddit</label>
+                <label class="visually-hidden" for="search">Search or add a health community</label>
                 <div class="combo">
                   <input
                     type="search"
                     id="search"
                     class="search-input"
-                    placeholder="Search or add a subreddit — endo, python…"
+                    placeholder="Search or add a community — endo, PCOS, lupus…"
                     autocomplete="off"
                     spellcheck="false"
                     role="combobox"
@@ -68,9 +69,14 @@
                 </div>
               </div>
 
-              <!-- Category groups (collapsible) rendered from /api/subreddits. -->
-              <div class="categories" id="categories" aria-live="polite">
-                <p class="loading" id="categories-loading">Loading subreddits…</p>
+              <!-- Browse by condition theme (rendered from /api/subreddits). -->
+              <div class="themes" id="theme-chips" aria-label="Condition themes"></div>
+
+              <!-- Dynamic suggestions: starter set, a theme, or communities
+                   related to what's already selected. -->
+              <p class="suggested-label" id="suggested-label">Popular communities</p>
+              <div class="suggested" id="suggested" aria-live="polite">
+                <p class="loading" id="suggested-loading">Loading communities…</p>
               </div>
             </div>
 

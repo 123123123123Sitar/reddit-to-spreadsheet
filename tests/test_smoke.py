@@ -204,5 +204,8 @@ def test_subreddits_endpoint(client):
     resp = client.get("/api/subreddits")
     assert resp.status_code == 200
     data = resp.get_json()
-    assert "categories" in data
-    assert "Health" in data["categories"]
+    assert "themes" in data
+    assert "Women's health" in data["themes"]
+    assert "endometriosis" in data["themes"]["Women's health"]
+    assert "pool" in data and "endometriosis" in data["pool"]
+    assert "popular" in data and data["popular"]

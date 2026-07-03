@@ -39,8 +39,8 @@ _ONE_DAY = 86400
 _MAX_CAP = 100_000
 
 app = Flask(__name__, static_folder="static", static_url_path="/static")
-# Preserve CATEGORIES insertion order in JSON (Flask alphabetizes keys by
-# default), so the picker leads with Health rather than sorting groups A-Z.
+# Preserve THEMES insertion order in JSON (Flask alphabetizes keys by default),
+# so themes stay in the curated order (Women's health first).
 app.json.sort_keys = False
 
 
@@ -124,9 +124,13 @@ def index():
 
 @app.get("/api/subreddits")
 def api_subreddits():
-    """Return the curated categories plus the wider autocomplete pool."""
+    """Return condition themes, the autocomplete pool, and starter suggestions."""
     return jsonify(
-        {"categories": subreddits.CATEGORIES, "pool": subreddits.SUGGEST_POOL}
+        {
+            "themes": subreddits.THEMES,
+            "pool": subreddits.POOL,
+            "popular": subreddits.POPULAR,
+        }
     )
 
 
