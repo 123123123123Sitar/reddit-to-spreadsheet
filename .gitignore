@@ -8,3 +8,4 @@ mercury_key.txt
 outputs/
 .playwright-mcp/
 .DS_Store
+.vercel
