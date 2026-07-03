@@ -42,7 +42,7 @@
   const statusEl         = $("status");
   const errorEl          = $("error");
 
-  const SUGGEST_CAP = 16;   // most pills to show at once
+  const SUGGEST_CAP = 12;   // most pills to show at once
 
   // ---- State ------------------------------------------------------------
   const POOL = [];                   // every health subreddit (autocomplete)
@@ -101,6 +101,7 @@
     renderTray();
     selectedCountEl.textContent = String(selected.size);
     scheduleSuggestions();
+    updateWizardControls();
   }
 
   function renderTray() {
@@ -512,13 +513,95 @@
 
   chatForm.addEventListener("submit", (e) => { e.preventDefault(); sendChat(chatInput.value); });
 
-  const tryNow = $("try-now");
-  if (tryNow) {
-    tryNow.addEventListener("click", () => {
-      chatInput.scrollIntoView({ behavior: "smooth", block: "center" });
-      chatInput.focus({ preventScroll: true });
+  // ---- Wizard navigation (one step per screen) -------------------------
+  const STEPS = ["communities", "window", "export"];
+  const wsteps = Array.from(document.querySelectorAll(".wstep"));
+  const stepDots = Array.from(document.querySelectorAll(".step-dot"));
+  const backBtn = $("wiz-back");
+  const nextBtn = $("wiz-next");
+  const wizMsg = $("wiz-msg");
+  const exportRecap = $("export-recap");
+  let stepIndex = 0;
+
+  const clampStep = (i) => Math.max(0, Math.min(STEPS.length - 1, i));
+
+  function showStep(i) {
+    stepIndex = clampStep(i);
+    wsteps.forEach((s) => { s.hidden = Number(s.dataset.step) !== stepIndex; });
+    stepDots.forEach((d) => {
+      const idx = Number(d.dataset.step);
+      d.classList.toggle("active", idx === stepIndex);
+      d.classList.toggle("done", idx < stepIndex);
+      d.setAttribute("aria-current", idx === stepIndex ? "step" : "false");
     });
+    hideWizMsg();
+    updateWizardControls();
+    if (STEPS[stepIndex] === "export") renderRecap();
+    window.scrollTo({ top: 0, behavior: "smooth" });
   }
+
+  function updateWizardControls() {
+    backBtn.hidden = stepIndex === 0;
+    if (stepIndex === STEPS.length - 1) {
+      nextBtn.hidden = true;
+    } else {
+      nextBtn.hidden = false;
+      nextBtn.textContent = stepIndex === 0 ? "Next: window →" : "Next: export →";
+      nextBtn.disabled = stepIndex === 0 && selected.size === 0;
+    }
+  }
+
+  function showWizMsg(text) { wizMsg.textContent = text; wizMsg.hidden = false; }
+  function hideWizMsg() { wizMsg.hidden = true; wizMsg.textContent = ""; }
+
+  function goStep(i) { location.hash = STEPS[clampStep(i)]; }
+
+  function tryNext() {
+    if (stepIndex === 0 && selected.size === 0) {
+      showWizMsg("Pick at least one community to continue.");
+      return;
+    }
+    if (stepIndex === 1) {
+      if (!startDateEl.value || !endDateEl.value) { showWizMsg("Choose both a start and end date."); return; }
+      if (startDateEl.value > endDateEl.value) { showWizMsg("The start date must be on or before the end date."); return; }
+    }
+    goStep(stepIndex + 1);
+  }
+
+  function renderRecap() {
+    const subs = Array.from(selected.values());
+    const dash = (d) => d || "—";
+    const perSub = maxPostsEl.value + " posts" +
+      (includeCommentsEl.checked ? ", " + maxCommentsEl.value + " comments" : ", no comments");
+    exportRecap.innerHTML = "";
+    [
+      ["Communities", subs.length ? subs.length + " selected" : "none selected"],
+      ["Window", dash(startDateEl.value) + "  →  " + dash(endDateEl.value)],
+      ["Per subreddit", perSub],
+      ["Usernames", excludeNamesEl.checked ? "excluded" : "included"],
+    ].forEach(([k, v]) => {
+      const row = el("div", { class: "recap-row" });
+      row.appendChild(el("span", { class: "recap-k", text: k }));
+      row.appendChild(el("span", { class: "recap-v", text: v }));
+      exportRecap.appendChild(row);
+    });
+    if (subs.length) {
+      const chips = el("div", { class: "recap-chips" });
+      subs.slice().sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()))
+        .forEach((n) => chips.appendChild(el("span", { class: "recap-chip", text: "r/" + n })));
+      exportRecap.appendChild(chips);
+    }
+  }
+
+  function syncStepFromHash() {
+    const idx = STEPS.indexOf((location.hash || "").replace("#", ""));
+    showStep(idx >= 0 ? idx : 0);
+  }
+
+  nextBtn.addEventListener("click", tryNext);
+  backBtn.addEventListener("click", () => goStep(stepIndex - 1));
+  stepDots.forEach((d) => d.addEventListener("click", () => goStep(Number(d.dataset.step))));
+  window.addEventListener("hashchange", syncStepFromHash);
 
   // ---- Wire up events ---------------------------------------------------
   clearSelectionEl.addEventListener("click", clearSelection);
@@ -530,4 +613,5 @@
   renderTray();
   loadPool();
   fetchSuggestions();
+  syncStepFromHash();
 })();

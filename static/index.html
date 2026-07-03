@@ -9,7 +9,6 @@
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%93%8A%3C/text%3E%3C/svg%3E" />
 </head>
 <body>
-  <!-- Spreadsheet-style toolbar: names the "workbook" the user is building. -->
   <div class="toolbar">
     <div class="wrap toolbar-inner">
       <span class="sheet-tab"><span class="tab-grid" aria-hidden="true"></span>reddit-to-spreadsheet</span>
@@ -18,169 +17,172 @@
 
   <header class="hero">
     <div class="wrap">
-      <h1 class="hero-title">Subreddit posts &rarr; data files + spreadsheet.</h1>
-      <button type="button" class="hero-cta" id="try-now">Try now &rarr;</button>
+      <h1 class="hero-title">Subreddit posts &rarr; a spreadsheet.</h1>
     </div>
   </header>
 
-  <main class="wrap">
-    <div class="worksheet">
-      <!-- ROW 01 — SOURCE ------------------------------------------------ -->
-      <section class="step" aria-labelledby="picker-heading">
-        <div class="step-rail"><span class="rownum">01</span></div>
-        <div class="step-body">
-          <div class="step-head">
-            <h2 id="picker-heading" class="step-title">Source</h2>
-            <span class="step-hint">which communities</span>
+  <div class="wrap">
+    <!-- Progress stepper -->
+    <nav class="stepper" aria-label="Progress">
+      <button type="button" class="step-dot active" data-step="0"><span class="dot-num">1</span> Communities</button>
+      <button type="button" class="step-dot" data-step="1"><span class="dot-num">2</span> Window</button>
+      <button type="button" class="step-dot" data-step="2"><span class="dot-num">3</span> Export</button>
+    </nav>
+
+    <main class="wizard">
+      <!-- STEP 1 — Communities -------------------------------------------- -->
+      <section class="wstep" data-step="0" aria-labelledby="picker-heading">
+        <div class="step-head">
+          <h2 id="picker-heading" class="step-title">Choose communities</h2>
+          <span class="step-hint">describe a condition, or search</span>
+        </div>
+
+        <!-- Chat: describe a condition, get the communities auto-selected. -->
+        <div class="chat">
+          <div class="chat-log" id="chat-log"></div>
+          <form class="chat-form" id="chat-form">
+            <input
+              type="text"
+              id="chat-input"
+              class="chat-input"
+              placeholder="Describe a condition — e.g. lupus and joint pain"
+              autocomplete="off"
+            />
+            <button type="submit" class="chat-send" id="chat-send" aria-label="Send">&rarr;</button>
+          </form>
+        </div>
+
+        <!-- Search + add: suggestions appear as you type, click to add. -->
+        <div class="field search-field">
+          <label class="visually-hidden" for="search">Search or add a health community</label>
+          <div class="combo">
+            <input
+              type="search"
+              id="search"
+              class="search-input"
+              placeholder="Search or add a community — endo, PCOS, lupus…"
+              autocomplete="off"
+              spellcheck="false"
+              role="combobox"
+              aria-expanded="false"
+              aria-controls="suggest-list"
+              aria-autocomplete="list"
+            />
+            <ul class="suggest" id="suggest-list" role="listbox" hidden></ul>
           </div>
+        </div>
 
-          <!-- Chat: describe a condition, get the communities auto-selected. -->
-          <div class="chat">
-            <div class="chat-log" id="chat-log"></div>
-            <form class="chat-form" id="chat-form">
-              <input
-                type="text"
-                id="chat-input"
-                class="chat-input"
-                placeholder="Describe a condition — e.g. lupus and joint pain"
-                autocomplete="off"
-              />
-              <button type="submit" class="chat-send" id="chat-send" aria-label="Send">&rarr;</button>
-            </form>
+        <!-- Suggestions from Mercury 2, related to what's selected. -->
+        <div class="suggested-head">
+          <p class="suggested-label" id="suggested-label">Suggested</p>
+          <span class="suggested-note" id="suggested-note" hidden>~ approx. posts</span>
+        </div>
+        <div class="suggested" id="suggested" aria-live="polite">
+          <p class="loading" id="suggested-loading">Loading communities…</p>
+        </div>
+
+        <!-- Everything currently selected, as removable chips. -->
+        <div class="selected-bar">
+          <div class="selected-head">
+            <span class="tray-title">Selected</span>
+            <span class="tray-count" id="selected-count">0</span>
+            <button type="button" class="tray-clear" id="clear-selection" hidden>Clear all</button>
           </div>
-
-          <div class="source-grid">
-            <div class="source-main">
-              <!-- Search + add: suggestions appear as you type, click to add. -->
-              <div class="field search-field">
-                <label class="visually-hidden" for="search">Search or add a health community</label>
-                <div class="combo">
-                  <input
-                    type="search"
-                    id="search"
-                    class="search-input"
-                    placeholder="Search or add a community — endo, PCOS, lupus…"
-                    autocomplete="off"
-                    spellcheck="false"
-                    role="combobox"
-                    aria-expanded="false"
-                    aria-controls="suggest-list"
-                    aria-autocomplete="list"
-                  />
-                  <ul class="suggest" id="suggest-list" role="listbox" hidden></ul>
-                </div>
-              </div>
-
-              <!-- Suggestions from Mercury 2, related to what's selected. -->
-              <div class="suggested-head">
-                <p class="suggested-label" id="suggested-label">Suggested</p>
-                <span class="suggested-note" id="suggested-note" hidden>~ approx. posts</span>
-              </div>
-              <div class="suggested" id="suggested" aria-live="polite">
-                <p class="loading" id="suggested-loading">Loading communities…</p>
-              </div>
-            </div>
-
-            <!-- Running list of everything currently selected. -->
-            <aside class="tray" aria-label="Selected subreddits">
-              <div class="tray-head">
-                <span class="tray-title">Selected</span>
-                <span class="tray-count" id="selected-count">0</span>
-              </div>
-              <ul class="tray-list" id="tray-list"></ul>
-              <p class="tray-empty" id="tray-empty">Nothing yet — search above or pick from the list.</p>
-              <button type="button" class="tray-clear" id="clear-selection" hidden>Clear all</button>
-            </aside>
-          </div>
+          <ul class="tray-list" id="tray-list"></ul>
+          <p class="tray-empty" id="tray-empty">Nothing yet — pick a suggestion or search above.</p>
         </div>
       </section>
 
-      <!-- ROW 02 — WINDOW ------------------------------------------------ -->
-      <section class="step" aria-labelledby="options-heading">
-        <div class="step-rail"><span class="rownum">02</span></div>
-        <div class="step-body">
-          <div class="step-head">
-            <h2 id="options-heading" class="step-title">Window</h2>
-            <span class="step-hint">dates &amp; limits</span>
+      <!-- STEP 2 — Window ------------------------------------------------- -->
+      <section class="wstep" data-step="1" hidden aria-labelledby="options-heading">
+        <div class="step-head">
+          <h2 id="options-heading" class="step-title">Set the window</h2>
+          <span class="step-hint">dates &amp; limits</span>
+        </div>
+
+        <div class="options-grid">
+          <div class="field">
+            <label class="field-label" for="start-date">Start date</label>
+            <input type="date" id="start-date" class="text-input" />
+            <div class="presets presets-date" data-target="start-date">
+              <button type="button" data-preset="earliest">Earliest</button>
+              <button type="button" data-preset="minus5y">5 yr ago</button>
+              <button type="button" data-preset="minus1y">1 yr ago</button>
+            </div>
           </div>
-
-          <div class="options-grid">
-            <div class="field">
-              <label class="field-label" for="start-date">Start date</label>
-              <input type="date" id="start-date" class="text-input" />
-              <div class="presets presets-date" data-target="start-date">
-                <button type="button" data-preset="earliest">Earliest</button>
-                <button type="button" data-preset="minus5y">5 yr ago</button>
-                <button type="button" data-preset="minus1y">1 yr ago</button>
-              </div>
-            </div>
-            <div class="field">
-              <label class="field-label" for="end-date">End date</label>
-              <input type="date" id="end-date" class="text-input" />
-              <div class="presets presets-date" data-target="end-date">
-                <button type="button" data-preset="minus1y">1 yr ago</button>
-                <button type="button" data-preset="today">Most recent</button>
-              </div>
-            </div>
-
-            <div class="field">
-              <label class="field-label" for="max-posts">Max posts / subreddit</label>
-              <input type="number" id="max-posts" class="text-input" min="1" max="100000" step="1" value="500" />
-              <div class="presets" data-target="max-posts">
-                <button type="button" data-val="100">100</button>
-                <button type="button" data-val="1000">1k</button>
-                <button type="button" data-val="10000">10k</button>
-                <button type="button" data-val="50000">Half</button>
-                <button type="button" data-val="100000">Max</button>
-              </div>
-            </div>
-            <div class="field" id="max-comments-field">
-              <label class="field-label" for="max-comments">Max comments / subreddit</label>
-              <input type="number" id="max-comments" class="text-input" min="1" max="100000" step="1" value="2000" />
-              <div class="presets" data-target="max-comments">
-                <button type="button" data-val="100">100</button>
-                <button type="button" data-val="1000">1k</button>
-                <button type="button" data-val="10000">10k</button>
-                <button type="button" data-val="50000">Half</button>
-                <button type="button" data-val="100000">Max</button>
-              </div>
+          <div class="field">
+            <label class="field-label" for="end-date">End date</label>
+            <input type="date" id="end-date" class="text-input" />
+            <div class="presets presets-date" data-target="end-date">
+              <button type="button" data-preset="minus1y">1 yr ago</button>
+              <button type="button" data-preset="today">Most recent</button>
             </div>
           </div>
 
-          <div class="toggles">
-            <label class="toggle">
-              <input type="checkbox" id="include-comments" checked />
-              <span>Include comments</span>
-            </label>
-            <label class="toggle">
-              <input type="checkbox" id="exclude-usernames" />
-              <span>Exclude usernames</span>
-            </label>
+          <div class="field">
+            <label class="field-label" for="max-posts">Max posts / subreddit</label>
+            <input type="number" id="max-posts" class="text-input" min="1" max="100000" step="1" value="500" />
+            <div class="presets" data-target="max-posts">
+              <button type="button" data-val="100">100</button>
+              <button type="button" data-val="1000">1k</button>
+              <button type="button" data-val="10000">10k</button>
+              <button type="button" data-val="50000">Half</button>
+              <button type="button" data-val="100000">Max</button>
+            </div>
           </div>
+          <div class="field" id="max-comments-field">
+            <label class="field-label" for="max-comments">Max comments / subreddit</label>
+            <input type="number" id="max-comments" class="text-input" min="1" max="100000" step="1" value="2000" />
+            <div class="presets" data-target="max-comments">
+              <button type="button" data-val="100">100</button>
+              <button type="button" data-val="1000">1k</button>
+              <button type="button" data-val="10000">10k</button>
+              <button type="button" data-val="50000">Half</button>
+              <button type="button" data-val="100000">Max</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="toggles">
+          <label class="toggle">
+            <input type="checkbox" id="include-comments" checked />
+            <span>Include comments</span>
+          </label>
+          <label class="toggle">
+            <input type="checkbox" id="exclude-usernames" />
+            <span>Exclude usernames</span>
+          </label>
         </div>
       </section>
 
-      <!-- ROW 03 — EXPORT ------------------------------------------------ -->
-      <section class="step step-export" aria-labelledby="export-heading">
-        <div class="step-rail"><span class="rownum">03</span></div>
-        <div class="step-body">
-          <div class="step-head">
-            <h2 id="export-heading" class="step-title">Export</h2>
-            <span class="step-hint">download the workbook</span>
-          </div>
-
-          <button type="button" class="btn-primary" id="generate">
-            <span class="spinner" id="spinner" hidden aria-hidden="true"></span>
-            <span class="btn-label" id="generate-label">Generate spreadsheet</span>
-            <span class="btn-arrow" aria-hidden="true">&rarr;</span>
-          </button>
-          <p class="status" id="status" role="status" aria-live="polite" hidden></p>
-          <p class="error" id="error" role="alert" hidden></p>
+      <!-- STEP 3 — Export ------------------------------------------------- -->
+      <section class="wstep" data-step="2" hidden aria-labelledby="export-heading">
+        <div class="step-head">
+          <h2 id="export-heading" class="step-title">Export</h2>
+          <span class="step-hint">review &amp; download</span>
         </div>
-      </section>
-    </div>
 
-  </main>
+        <div class="recap" id="export-recap"></div>
+
+        <button type="button" class="btn-primary" id="generate">
+          <span class="spinner" id="spinner" hidden aria-hidden="true"></span>
+          <span class="btn-label" id="generate-label">Generate spreadsheet</span>
+          <span class="btn-arrow" aria-hidden="true">&rarr;</span>
+        </button>
+        <p class="status" id="status" role="status" aria-live="polite" hidden></p>
+        <p class="error" id="error" role="alert" hidden></p>
+      </section>
+
+      <!-- Wizard navigation ---------------------------------------------- -->
+      <div class="wizard-foot">
+        <p class="wiz-msg" id="wiz-msg" role="alert" hidden></p>
+        <div class="wizard-nav">
+          <button type="button" class="wiz-btn back" id="wiz-back" hidden>&larr; Back</button>
+          <button type="button" class="wiz-btn next" id="wiz-next">Next: window &rarr;</button>
+        </div>
+      </div>
+    </main>
+  </div>
 
   <script src="/static/app.js"></script>
 </body>
