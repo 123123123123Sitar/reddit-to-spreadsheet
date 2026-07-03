@@ -56,9 +56,9 @@ a { color: var(--accent-ink); }
 
 .wrap {
   width: 100%;
-  max-width: 780px;
-  margin: 0 auto;
-  padding: 0 22px;
+  max-width: none;
+  margin: 0;
+  padding: 0 clamp(20px, 4vw, 52px);
 }
 
 /* ---------- Toolbar ---------- */
@@ -102,30 +102,33 @@ a { color: var(--accent-ink); }
 
 /* ---------- Hero ---------- */
 .hero {
-  padding: 54px 0 72px;
-}
-.eyebrow {
-  margin: 0 0 16px;
-  font-family: var(--mono);
-  font-size: 0.72rem;
-  font-weight: 600;
-  letter-spacing: 0.2em;
-  text-transform: uppercase;
-  color: var(--muted);
+  padding: 46px 0 40px;
 }
 .hero-title {
   margin: 0;
-  font-size: clamp(2.15rem, 6.4vw, 3.4rem);
+  font-size: clamp(1.9rem, 4.2vw, 3rem);
   font-weight: 800;
-  letter-spacing: -0.032em;
-  line-height: 1.03;
+  letter-spacing: -0.03em;
+  line-height: 1.05;
 }
-.hero-lede {
-  margin: 18px 0 0;
-  max-width: 46ch;
-  color: var(--muted);
-  font-size: 1.06rem;
+.hero-cta {
+  margin-top: 22px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: 9px;
+  padding: 11px 20px;
+  font: inherit;
+  font-weight: 650;
+  font-size: 0.95rem;
+  cursor: pointer;
+  transition: background 0.15s ease, transform 0.05s ease;
 }
+.hero-cta:hover { background: var(--accent-ink); }
+.hero-cta:active { transform: translateY(1px); }
 
 /* ---------- Worksheet ---------- */
 .worksheet {
@@ -633,18 +636,6 @@ a { color: var(--accent-ink); }
   padding: 8px 2px;
   margin: 0;
 }
-
-/* ---------- Footer ---------- */
-.site-footer {
-  margin: 0 auto 40px;
-  color: var(--faint);
-  font-size: 0.8rem;
-  line-height: 1.6;
-  max-width: 62ch;
-  text-align: center;
-}
-.site-footer p { margin: 0; }
-.site-footer a { color: var(--muted); }
 
 /* ---------- Utilities ---------- */
 .visually-hidden {

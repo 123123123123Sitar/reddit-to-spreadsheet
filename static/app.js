@@ -512,6 +512,14 @@
 
   chatForm.addEventListener("submit", (e) => { e.preventDefault(); sendChat(chatInput.value); });
 
+  const tryNow = $("try-now");
+  if (tryNow) {
+    tryNow.addEventListener("click", () => {
+      chatInput.scrollIntoView({ behavior: "smooth", block: "center" });
+      chatInput.focus({ preventScroll: true });
+    });
+  }
+
   // ---- Wire up events ---------------------------------------------------
   clearSelectionEl.addEventListener("click", clearSelection);
   generateBtn.addEventListener("click", onGenerate);
