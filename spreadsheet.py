@@ -20,6 +20,7 @@ from collections import defaultdict
 from datetime import datetime, timezone
 
 from openpyxl import Workbook
+from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
 from openpyxl.styles import Font
 from openpyxl.utils import get_column_letter
 
@@ -66,9 +67,17 @@ def _year(created_utc) -> int:
 
 
 def _trunc(value):
-    """Clamp over-long strings to the xlsx cell limit; pass anything else through."""
-    if isinstance(value, str) and len(value) > _MAX_CELL_LEN:
-        return value[:_MAX_CELL_LEN]
+    """Make a value safe for an xlsx cell; pass non-strings through.
+
+    Strings are scrubbed of control characters that openpyxl rejects with
+    IllegalCharacterError (real Reddit text does contain them) and clamped to
+    the cell length limit. Only the spreadsheet is scrubbed -- the raw
+    .ndjson.zst export keeps the original text untouched.
+    """
+    if isinstance(value, str):
+        value = ILLEGAL_CHARACTERS_RE.sub("", value)
+        if len(value) > _MAX_CELL_LEN:
+            value = value[:_MAX_CELL_LEN]
     return value
 
 

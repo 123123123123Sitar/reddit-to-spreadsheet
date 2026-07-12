@@ -107,6 +107,17 @@ def test_build_workbook_bytes_sheets_and_rows():
     assert wb["Summary"].max_row >= 3
 
 
+def test_build_workbook_scrubs_illegal_control_chars():
+    # Real Reddit text contains control chars that openpyxl rejects outright
+    # (IllegalCharacterError) -- they must be scrubbed from cells, not crash
+    # the whole export.
+    posts = _stub_posts()
+    posts[0]["selftext"] = "before\x00middle\x0bafter\x1f"
+    raw = spreadsheet.build_workbook_bytes(posts, [])
+    wb = openpyxl.load_workbook(io.BytesIO(raw))
+    assert wb["Posts"].cell(row=2, column=6).value == "beforemiddleafter"
+
+
 def test_build_workbook_bytes_omits_empty_comments_sheet():
     # Per the contract the Comments sheet is only present when there are
     # comments; Posts + Summary must always exist.
