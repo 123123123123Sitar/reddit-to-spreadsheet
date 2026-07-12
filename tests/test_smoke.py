@@ -331,6 +331,45 @@ def test_collector_time_budget_partial(monkeypatch):
     assert all(collector._BUDGET_NOTE in e for e in result["errors"])
 
 
+def test_collector_budget_is_split_fairly(monkeypatch):
+    # A subreddit with endless posts must NOT starve the comments task: the
+    # budget is sliced per (sub, kind), so posts get cut at their slice and
+    # comments still run. (This is the "11k posts, 0 comments" regression.)
+    monkeypatch.delenv("RTS_FAKE", raising=False)
+    monkeypatch.setattr(collector, "REQUEST_SLEEP", 0.01)
+    monkeypatch.setattr(collector, "TIME_BUDGET", 0.6)
+
+    comment_pages = []
+
+    def fake_fetch(url, params):
+        import time as _t
+        _t.sleep(0.02)
+        if "comment" in url:
+            comment_pages.append(1)
+            if len(comment_pages) == 1:
+                return [{
+                    "id": "c1", "subreddit": "lupus", "created_utc": 500_000,
+                    "author": "a", "body": "a comment", "score": 1,
+                    "link_id": "t3_x", "parent_id": "t3_x", "permalink": "/c1",
+                }]
+            return []
+        # Endless stream of posts, walking backwards in time forever.
+        return [{
+            "id": f"p{params['before']}", "subreddit": "lupus",
+            "created_utc": int(params["before"]) - 1, "author": "a",
+            "title": "endless", "selftext": "", "score": 1,
+            "num_comments": 0, "permalink": "/p",
+        }]
+
+    monkeypatch.setattr(collector, "_fetch", fake_fetch)
+
+    result = collector.collect(["lupus"], 0, 1_000_000)
+
+    assert len(result["posts"]) > 0          # posts collected until their slice
+    assert len(result["comments"]) == 1      # comments still got their turn
+    assert any("post" in e and collector._BUDGET_NOTE in e for e in result["errors"])
+
+
 def test_collector_keyword_filter_fake(monkeypatch):
     monkeypatch.setenv("RTS_FAKE", "1")
     result = collector.collect(

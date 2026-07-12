@@ -53,7 +53,9 @@ Set `MERCURY_API_KEY` in the Vercel project (CLI above or Project → Settings �
 
 ### Hosted time limit & partial exports
 
-Vercel hard-kills the function at 300 s (the Hobby-plan maximum). When running on Vercel the collector therefore switches to a faster profile automatically (fewer retries, shorter waits) and stops collecting after ~250 s, returning **partial results** — the download still arrives, the status line says the export is partial, and the `X-Collect-Partial: 1` header is set. For big pulls, narrow the window / lower the caps / split subreddits across runs, or just run the app locally (no budget applies there by default).
+Vercel hard-kills the function at 300 s (the Hobby-plan maximum). When running on Vercel the collector therefore switches to a faster profile automatically (fewer retries, shorter waits) and stops collecting after ~250 s, returning **partial results** — the download still arrives, the status line says the export is partial, and the `X-Collect-Partial: 1` header is set. The budget is split **fairly across every subreddit × kind task** (task *i* of *N* must finish by *budget·(i+1)/N*, unused time rolls forward), so one huge subreddit's posts can't starve the comment collection behind it. For big pulls, narrow the window / lower the caps / split subreddits across runs, or just run the app locally (no budget applies there by default).
+
+Note that a **topic filter combined with huge caps** means scanning the *entire* window of every subreddit (caps count matching records), which rarely fits in 300 s across many subreddits — expect balanced-but-partial hosted results for that shape of run.
 
 The profile is env-tunable everywhere: `RTS_TIME_BUDGET` (seconds, 0 = unlimited), `RTS_MAX_ATTEMPTS`, `RTS_RETRY_MAX_WAIT`, `RTS_TIMEOUT`, `RTS_SLEEP`.
 

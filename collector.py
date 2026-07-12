@@ -232,7 +232,8 @@ def _collect_kind(
 
         # Out of wall-clock time (e.g. Vercel's 300s kill) -> stop cleanly.
         if deadline is not None and time.monotonic() >= deadline:
-            errors.append(f"{subreddit}/{kind}s: stopped early -- {_BUDGET_NOTE}")
+            what = "stopped early" if raw_rows_seen else "skipped"
+            errors.append(f"{subreddit}/{kind}s: {what} -- {_BUDGET_NOTE}")
             break
 
         src_name, url = sources[src_idx]
@@ -425,11 +426,6 @@ def collect(
     # Lowercase the filter once; _matches() assumes pre-lowercased keywords.
     keywords = [k.lower() for k in keywords if k and k.strip()] if keywords else None
 
-    # Wall-clock deadline (0/unset budget = no deadline). On Vercel this stops
-    # collection ~50s before the platform's 300s hard kill so the workbook and
-    # zip still get built and the user receives partial data, not an error.
-    deadline = (time.monotonic() + TIME_BUDGET) if TIME_BUDGET > 0 else None
-
     # Offline test hook: return deterministic synthetic data, no network.
     if os.environ.get("RTS_FAKE") == "1":
         return _fake_dataset(
@@ -442,31 +438,36 @@ def collect(
     comments: list[dict] = []
     errors: list[str] = []
 
+    # One task per (subreddit, kind), in the order they run.
+    tasks: list[tuple[str, str, int | None]] = []
     for sub in subreddits:
         sub = sub.strip().lstrip("/").removeprefix("r/").strip("/")
         if not sub:
             continue
-
-        if progress:
-            progress(f"Collecting posts for r/{sub} ...")
-        posts.extend(
-            _collect_kind(
-                sub, "post", start_ts, end_ts,
-                max_posts_per_sub, exclude_usernames, keywords, deadline,
-                progress, errors,
-            )
-        )
-
+        tasks.append((sub, "post", max_posts_per_sub))
         if include_comments:
-            if progress:
-                progress(f"Collecting comments for r/{sub} ...")
-            comments.extend(
-                _collect_kind(
-                    sub, "comment", start_ts, end_ts,
-                    max_comments_per_sub, exclude_usernames, keywords, deadline,
-                    progress, errors,
-                )
-            )
+            tasks.append((sub, "comment", max_comments_per_sub))
+
+    # Wall-clock budget (0/unset = no deadline). On Vercel this stops
+    # collection ~50s before the platform's 300s hard kill so the workbook and
+    # zip still get built and the user receives partial data, not an error.
+    # The budget is split FAIRLY across tasks: task i must finish by
+    # t0 + budget*(i+1)/N, so one huge subreddit's posts cannot starve every
+    # comment task behind it. A task that finishes early rolls its unused time
+    # forward to the tasks after it.
+    t0 = time.monotonic()
+
+    for i, (sub, kind, cap) in enumerate(tasks):
+        deadline = (
+            t0 + TIME_BUDGET * (i + 1) / len(tasks) if TIME_BUDGET > 0 else None
+        )
+        if progress:
+            progress(f"Collecting {kind}s for r/{sub} ...")
+        found = _collect_kind(
+            sub, kind, start_ts, end_ts,
+            cap, exclude_usernames, keywords, deadline, progress, errors,
+        )
+        (posts if kind == "post" else comments).extend(found)
 
     if progress:
         progress(
