@@ -216,8 +216,12 @@ _KEYWORD_STOPWORDS = {
 }
 
 
-def _mercury_keywords(topic: str) -> list[str] | None:
-    """Expand a topic description into search keywords via Mercury 2."""
+def _mercury_topic_plan(topic: str, subs: list[str]) -> dict | None:
+    """Ask Mercury 2 for search keywords AND which of the requested subreddits
+    are already dedicated to the topic (those get exported unfiltered).
+
+    Returns ``{"keywords": [...], "dedicated": {lowercase sub names}}`` or None.
+    """
     if os.environ.get("RTS_FAKE") == "1":
         return None
     key = _mercury_key()
@@ -225,11 +229,17 @@ def _mercury_keywords(topic: str) -> list[str] | None:
         return None
     prompt = (
         'A researcher only wants Reddit posts/comments about: "' + topic + '". '
-        "List 8 to 15 short lowercase keywords or phrases to match such text: "
-        "the core terms plus common synonyms, abbreviations, and everyday "
-        "patient wording. Text matching ANY keyword (case-insensitive "
-        "substring) is kept, so keep each keyword specific to the topic. "
-        'Respond as JSON: {"keywords":["..."]}'
+        "1) List 8 to 15 short lowercase keywords or phrases to match such "
+        "text: the core terms plus common synonyms, abbreviations, and "
+        "everyday patient wording. Text matching ANY keyword "
+        "(case-insensitive substring) is kept, so keep each keyword specific "
+        "to the topic. "
+        "2) They are collecting from these subreddits: " + ", ".join(subs) + ". "
+        "Name the ones that are ENTIRELY dedicated to that topic (nearly "
+        "every post there is about it, so keyword filtering would only lose "
+        "relevant posts). A broader community that merely includes the topic "
+        "does not count. Respond as JSON: "
+        '{"keywords":["..."],"dedicated_subreddits":["..."]}'
     )
     try:
         resp = requests.post(
@@ -249,16 +259,44 @@ def _mercury_keywords(topic: str) -> list[str] | None:
         resp.raise_for_status()
         data = json.loads(resp.json()["choices"][0]["message"]["content"])
     except Exception:  # noqa: BLE001 - any failure falls back
-        app.logger.exception("mercury keywords failed")
+        app.logger.exception("mercury topic plan failed")
+        return None
+    if not isinstance(data, dict):
         return None
 
-    out, seen = [], set()
-    for item in data.get("keywords", []) if isinstance(data, dict) else []:
+    keywords, seen = [], set()
+    for item in data.get("keywords", []):
         kw = str(item).strip().lower()
         if kw and kw not in seen:
             seen.add(kw)
-            out.append(kw)
-    return out[:20] or None
+            keywords.append(kw)
+
+    # Only exempt subreddits the user actually asked for.
+    requested = {s.lower() for s in subs}
+    dedicated = set()
+    raw = data.get("dedicated_subreddits", [])
+    for item in raw if isinstance(raw, list) else []:
+        name = str(item).strip().lstrip("/").removeprefix("r/").strip("/").lower()
+        if name in requested:
+            dedicated.add(name)
+
+    if not keywords:
+        return None
+    return {"keywords": keywords[:20], "dedicated": dedicated}
+
+
+def _squash(s: str) -> str:
+    return "".join(ch for ch in s.lower() if ch.isalnum())
+
+
+def _heuristic_dedicated(topic: str, subs: list[str]) -> set[str]:
+    """Subs whose name contains the (squashed) topic are dedicated to it —
+    e.g. topic 'breast cancer' -> r/BreastCancer, r/breastcancerawareness,
+    but NOT r/cancer. Backstop for when Mercury is unavailable."""
+    t = _squash(topic)
+    if len(t) < 4:  # too short to be a meaningful name match
+        return set()
+    return {s.lower() for s in subs if t in _squash(s)}
 
 
 def _fallback_keywords(topic: str) -> list[str]:
@@ -524,10 +562,20 @@ def api_collect():
         return jsonify({"error": str(exc)}), 400
 
     # Optional topic filter: expand the description into keywords (Mercury 2,
-    # falling back to the words the user typed).
-    keywords = (_mercury_keywords(topic) or _fallback_keywords(topic)) if topic else []
-    if keywords:
-        app.logger.info("collect: topic %r -> keywords %s", topic, keywords)
+    # falling back to the words the user typed) and figure out which requested
+    # subreddits are already dedicated to the topic -- those are exported in
+    # full, since keyword-filtering a dedicated community only loses relevant
+    # posts that don't happen to name the topic.
+    keywords: list[str] = []
+    exempt: set[str] = set()
+    if topic:
+        plan = _mercury_topic_plan(topic, subs)
+        keywords = (plan or {}).get("keywords") or _fallback_keywords(topic)
+        exempt = _heuristic_dedicated(topic, subs) | (plan or {}).get("dedicated", set())
+        app.logger.info(
+            "collect: topic %r -> keywords %s, unfiltered subs %s",
+            topic, keywords, sorted(exempt) or "none",
+        )
 
     # --- collect + build workbook (any failure -> HTTP 500) --------------- #
     started = time.monotonic()
@@ -541,6 +589,7 @@ def api_collect():
             max_comments_per_sub=max_comments,
             exclude_usernames=exclude_usernames,
             keywords=keywords or None,
+            filter_exempt=exempt or None,
             progress=lambda msg: app.logger.info("collect: %s", msg),
         )
         posts = result.get("posts", [])
@@ -570,6 +619,10 @@ def api_collect():
     if keywords:
         # URL-encoded so the header stays latin-1 safe; the UI decodes it.
         headers["X-Collect-Keywords"] = urllib.parse.quote(", ".join(keywords))[:1000]
+        if exempt:
+            # Preserve the casing the user asked with for display.
+            shown = [s for s in subs if s.lower() in exempt]
+            headers["X-Collect-Unfiltered"] = urllib.parse.quote(", ".join(shown))[:1000]
     if any(collector._BUDGET_NOTE in e for e in errors):
         # Collection stopped at the server's time budget (Vercel 300s limit).
         headers["X-Collect-Partial"] = "1"

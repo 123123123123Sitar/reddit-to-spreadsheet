@@ -224,6 +224,54 @@ def test_collect_endpoint_topic_filter(client, monkeypatch):
     assert "raw/endometriosis_comments.ndjson.zst" not in names
 
 
+def test_heuristic_dedicated():
+    subs = ["BreastCancer", "breastcancerawareness", "cancer", "oncology", "health"]
+    assert app_module._heuristic_dedicated("breast cancer", subs) == {
+        "breastcancer", "breastcancerawareness",
+    }
+    # r/cancer is broader than the topic, never exempted by name.
+    assert "cancer" not in app_module._heuristic_dedicated("breast cancer", subs)
+    # Too-short squashed topics never match.
+    assert app_module._heuristic_dedicated("ibs", ["ibs"]) == set()
+
+
+def test_collector_filter_exempt_fake(monkeypatch):
+    # With a topic filter, a dedicated (exempt) subreddit is exported in full
+    # while the others are still keyword-filtered.
+    monkeypatch.setenv("RTS_FAKE", "1")
+    result = collector.collect(
+        ["endometriosis", "PCOS"], 1_700_000_000, 1_700_200_000,
+        keywords=["no-such-word"],
+        filter_exempt={"endometriosis"},
+    )
+    by_sub = {}
+    for p in result["posts"]:
+        by_sub.setdefault(p["subreddit"], []).append(p)
+    assert len(by_sub.get("endometriosis", [])) == 3   # unfiltered: all posts
+    assert "PCOS" not in by_sub                        # filtered: nothing matches
+    assert all(c["subreddit"] == "endometriosis" for c in result["comments"])
+
+
+def test_collect_endpoint_dedicated_sub_unfiltered(client, monkeypatch):
+    # Topic "synthetic": r/synthetic_support matches by name -> exported in
+    # full (posts AND comments); r/endometriosis stays keyword-filtered, and
+    # its comments (which never say "synthetic") are dropped.
+    monkeypatch.setenv("RTS_FAKE", "1")
+    resp = client.post(
+        "/api/collect",
+        json={
+            "subreddits": ["synthetic_support", "endometriosis"],
+            "start_date": "2023-11-01",
+            "end_date": "2023-11-30",
+            "topic": "synthetic",
+        },
+    )
+    assert resp.status_code == 200
+    assert int(resp.headers["X-Collect-Posts"]) == 6      # 3 unfiltered + 3 match
+    assert int(resp.headers["X-Collect-Comments"]) == 5   # exempt sub only
+    assert resp.headers.get("X-Collect-Unfiltered") == "synthetic_support"
+
+
 def test_fallback_keywords():
     kws = app_module._fallback_keywords("Chemotherapy and hair loss")
     assert "chemotherapy and hair loss" in kws  # full phrase first

@@ -434,12 +434,15 @@
         const num = (h) => { const n = parseInt(res.headers.get(h), 10); return Number.isFinite(n) ? n : 0; };
         let keywords = res.headers.get("X-Collect-Keywords") || "";
         try { keywords = decodeURIComponent(keywords); } catch (e) { /* show raw */ }
+        let unfiltered = res.headers.get("X-Collect-Unfiltered") || "";
+        try { unfiltered = decodeURIComponent(unfiltered); } catch (e) { /* show raw */ }
         const counts = {
           posts: num("X-Collect-Posts"),
           comments: num("X-Collect-Comments"),
           errors: num("X-Collect-Errors"),
           serverSecs: res.headers.get("X-Collect-Seconds") || null,
           keywords,
+          unfiltered,
           partial: res.headers.get("X-Collect-Partial") === "1",
         };
         return res.blob().then((blob) => ({ blob, fname, counts }));
@@ -451,7 +454,12 @@
         const c = out.counts;
         console.log("[reddit-to-spreadsheet] workflow completed in " + secs + "s",
           { posts: c.posts, comments: c.comments, errors: c.errors, serverSeconds: c.serverSecs });
-        const filterNote = c.keywords ? " (filtered by: " + c.keywords + ")" : "";
+        let filterNote = c.keywords ? " (filtered by: " + c.keywords : "";
+        if (filterNote && c.unfiltered) {
+          filterNote += "; exported in full because they're dedicated to the topic: " +
+            c.unfiltered.split(", ").map((s) => "r/" + s).join(", ");
+        }
+        if (filterNote) filterNote += ")";
         if (c.posts + c.comments === 0) {
           showStatus(
             "Finished in " + secs + "s, but no posts or comments matched that window" +

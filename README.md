@@ -26,7 +26,9 @@ Every collect returns one `reddit_export_<subs>.zip` containing:
 
 ## Topic filter
 
-The window step has an optional **topic filter** ("only keep posts about…"). The description is expanded into a keyword list — via Mercury 2 when a key is configured (synonyms, abbreviations, patient wording), otherwise the significant words you typed — and only posts/comments whose title/body contains at least one keyword (case-insensitive) are exported. Filtering happens before the per-subreddit caps are counted, so caps count *matching* records. The `X-Collect-Keywords` response header (URL-encoded) reports the expanded list, and the UI shows it in the status line.
+The window step has an optional **topic filter** ("only keep posts about…"). The description is expanded into a keyword list — via Mercury 2 when a key is configured (synonyms, abbreviations, patient wording), otherwise the significant words you typed — and only posts/comments whose title/body contains at least one keyword (case-insensitive) are exported. Filtering happens before the per-subreddit caps are counted, so caps count *matching* records.
+
+**Dedicated communities are exported in full.** A subreddit that is entirely about the topic (topic "breast cancer" → r/BreastCancer, r/breastcancerawareness) skips the keyword filter — nearly every post there is on-topic, and posts like "surgery tomorrow, so scared" would otherwise be lost for not naming the condition. Mercury classifies which of the requested subreddits are dedicated (backstop: name matching against the topic); the general ones (r/cancer, r/health, …) stay keyword-filtered. The `X-Collect-Keywords` / `X-Collect-Unfiltered` response headers (URL-encoded) report the expanded list and the exempted subreddits, and the UI shows both in the status line.
 
 ## AI suggestions & chat (Mercury 2)
 

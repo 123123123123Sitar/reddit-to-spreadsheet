@@ -339,13 +339,15 @@ def _fake_dataset(
     max_comments_per_sub: int | None,
     exclude_usernames: bool,
     keywords: list[str] | None,
+    filter_exempt: set[str],
     progress,
 ) -> dict:
     """
     Deterministic offline dataset: 3 posts + 5 comments per subreddit, all
     timestamped inside the requested window. Exercises author normalization
     (one deleted author per group) and respects caps, include_comments, and
-    the keyword filter (applied through the same ``_matches`` helper).
+    the keyword filter (applied through the same ``_matches`` helper, with
+    ``filter_exempt`` subreddits skipping it just like the live path).
     """
     posts: list[dict] = []
     comments: list[dict] = []
@@ -354,6 +356,7 @@ def _fake_dataset(
     for si, sub in enumerate(subreddits):
         if progress:
             progress(f"[fake] generating data for r/{sub}")
+        kw = None if sub.lower() in filter_exempt else keywords
 
         n_posts = 3 if max_posts_per_sub is None else min(3, max_posts_per_sub)
         for i in range(n_posts):
@@ -371,7 +374,7 @@ def _fake_dataset(
                 "permalink": f"/r/{sub}/comments/fp_{si}_{i}/synthetic_post_{i}/",
             }
             record = _norm_post(raw, sub, exclude_usernames)
-            if _matches(record, keywords):
+            if _matches(record, kw):
                 posts.append(record)
 
         if include_comments:
@@ -390,7 +393,7 @@ def _fake_dataset(
                     "permalink": f"/r/{sub}/comments/fp_{si}_0/synthetic_post_0/fc_{si}_{j}/",
                 }
                 record = _norm_comment(raw, sub, exclude_usernames)
-                if _matches(record, keywords):
+                if _matches(record, kw):
                     comments.append(record)
 
     return {"posts": posts, "comments": comments, "errors": []}
@@ -407,6 +410,7 @@ def collect(
     max_comments_per_sub: int | None = 2000,
     exclude_usernames: bool = False,
     keywords: list[str] | None = None,
+    filter_exempt: set[str] | None = None,
     progress=None,
 ) -> dict:
     """
@@ -415,6 +419,8 @@ def collect(
 
     ``keywords``, when given, keeps only records whose text contains at least
     one keyword (case-insensitive); caps count the records that MATCH.
+    ``filter_exempt`` names subreddits (case-insensitive) whose records skip
+    the keyword filter entirely -- communities already dedicated to the topic.
 
     Returns ``{"posts": [...], "comments": [...], "errors": [...]}``. Never
     raises on network failure -- a subreddit/endpoint that keeps failing after
@@ -425,13 +431,14 @@ def collect(
     """
     # Lowercase the filter once; _matches() assumes pre-lowercased keywords.
     keywords = [k.lower() for k in keywords if k and k.strip()] if keywords else None
+    exempt = {s.lower() for s in filter_exempt} if filter_exempt else set()
 
     # Offline test hook: return deterministic synthetic data, no network.
     if os.environ.get("RTS_FAKE") == "1":
         return _fake_dataset(
             subreddits, start_ts, end_ts, include_comments,
             max_posts_per_sub, max_comments_per_sub, exclude_usernames,
-            keywords, progress,
+            keywords, exempt, progress,
         )
 
     posts: list[dict] = []
@@ -463,9 +470,11 @@ def collect(
         )
         if progress:
             progress(f"Collecting {kind}s for r/{sub} ...")
+        # Dedicated communities skip the topic filter -- everything is on-topic.
+        kw = None if sub.lower() in exempt else keywords
         found = _collect_kind(
             sub, kind, start_ts, end_ts,
-            cap, exclude_usernames, keywords, deadline, progress, errors,
+            cap, exclude_usernames, kw, deadline, progress, errors,
         )
         (posts if kind == "post" else comments).extend(found)
 
