@@ -49,7 +49,13 @@ vercel env add MERCURY_API_KEY production   # paste the key when prompted
 vercel --prod             # promote to production
 ```
 
-Set `MERCURY_API_KEY` in the Vercel project (CLI above or Project → Settings → Environment Variables). Note: large collections can exceed Vercel's function time limit — keep the per-subreddit caps modest for the hosted version.
+Set `MERCURY_API_KEY` in the Vercel project (CLI above or Project → Settings → Environment Variables).
+
+### Hosted time limit & partial exports
+
+Vercel hard-kills the function at 300 s (the Hobby-plan maximum). When running on Vercel the collector therefore switches to a faster profile automatically (fewer retries, shorter waits) and stops collecting after ~250 s, returning **partial results** — the download still arrives, the status line says the export is partial, and the `X-Collect-Partial: 1` header is set. For big pulls, narrow the window / lower the caps / split subreddits across runs, or just run the app locally (no budget applies there by default).
+
+The profile is env-tunable everywhere: `RTS_TIME_BUDGET` (seconds, 0 = unlimited), `RTS_MAX_ATTEMPTS`, `RTS_RETRY_MAX_WAIT`, `RTS_TIMEOUT`, `RTS_SLEEP`.
 
 ## Offline demo mode (`RTS_FAKE=1`)
 

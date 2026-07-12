@@ -440,6 +440,7 @@
           errors: num("X-Collect-Errors"),
           serverSecs: res.headers.get("X-Collect-Seconds") || null,
           keywords,
+          partial: res.headers.get("X-Collect-Partial") === "1",
         };
         return res.blob().then((blob) => ({ blob, fname, counts }));
       })
@@ -465,8 +466,13 @@
           let msg = "Done in " + secs + "s — exported " + c.posts + " posts and " +
             c.comments + " comments to " + out.fname +
             " (.xlsx + raw .ndjson.zst inside)" + filterNote + ".";
-          if (c.errors) msg += " Note: the data sources returned " + c.errors + " error(s), so some data may be missing.";
-          showStatus(msg, c.errors ? "warn" : "ok");
+          if (c.partial) {
+            msg += " Collection stopped at the server's time limit, so this is a partial export — " +
+              "narrow the date window, lower the caps, or split subreddits across runs to get everything.";
+          } else if (c.errors) {
+            msg += " Note: the data sources returned " + c.errors + " error(s), so some data may be missing.";
+          }
+          showStatus(msg, (c.errors || c.partial) ? "warn" : "ok");
         }
       })
       .catch((err) => {

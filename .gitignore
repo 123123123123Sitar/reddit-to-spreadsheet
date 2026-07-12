@@ -9,3 +9,4 @@ outputs/
 .playwright-mcp/
 .DS_Store
 .vercel
+.env*

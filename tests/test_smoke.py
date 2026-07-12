@@ -311,6 +311,26 @@ def test_collector_arctic_shift_on_empty_pullpush(monkeypatch):
     assert result["errors"] == []  # empty-index fallback is not an error
 
 
+def test_collector_time_budget_partial(monkeypatch):
+    # An exhausted time budget must stop collection cleanly with a note per
+    # sub/kind and keep whatever was already collected (here: nothing), never
+    # raise -- this is what turns Vercel's FUNCTION_INVOCATION_TIMEOUT into a
+    # partial export.
+    monkeypatch.delenv("RTS_FAKE", raising=False)
+    monkeypatch.setattr(collector, "TIME_BUDGET", 1e-9)  # expires immediately
+
+    def fail_if_called(url, params):
+        raise AssertionError("no network call should happen after the deadline")
+
+    monkeypatch.setattr(collector, "_fetch", fail_if_called)
+
+    result = collector.collect(["lupus"], 1_700_000_000, 1_700_001_000)
+
+    assert result["posts"] == [] and result["comments"] == []
+    assert len(result["errors"]) == 2  # posts + comments both noted
+    assert all(collector._BUDGET_NOTE in e for e in result["errors"])
+
+
 def test_collector_keyword_filter_fake(monkeypatch):
     monkeypatch.setenv("RTS_FAKE", "1")
     result = collector.collect(

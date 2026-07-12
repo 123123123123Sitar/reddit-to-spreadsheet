@@ -570,6 +570,9 @@ def api_collect():
     if keywords:
         # URL-encoded so the header stays latin-1 safe; the UI decodes it.
         headers["X-Collect-Keywords"] = urllib.parse.quote(", ".join(keywords))[:1000]
+    if any(collector._BUDGET_NOTE in e for e in errors):
+        # Collection stopped at the server's time budget (Vercel 300s limit).
+        headers["X-Collect-Partial"] = "1"
     return Response(zip_bytes, mimetype=ZIP_MIMETYPE, headers=headers)
 
 

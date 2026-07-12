@@ -47,10 +47,25 @@ COMMENT_URL = "https://api.pullpush.io/reddit/search/comment/"
 AS_SUBMISSION_URL = "https://arctic-shift.photon-reddit.com/api/posts/search"
 AS_COMMENT_URL = "https://arctic-shift.photon-reddit.com/api/comments/search"
 
+# On Vercel the function is hard-killed at 300s (Hobby max), so default to a
+# faster/less patient profile there and stop collecting before the platform
+# kills us (TIME_BUDGET), returning partial results instead of a timeout error.
+# Every knob can be overridden explicitly via its RTS_* env var.
+_ON_VERCEL = bool(os.environ.get("VERCEL"))
+
 PAGE_SIZE = 100          # size= per page (pullpush max)
-REQUEST_SLEEP = 0.6      # polite pause between requests, seconds
-REQUEST_TIMEOUT = 30     # per-request socket timeout, seconds
-MAX_ATTEMPTS = 6         # tenacity attempts per request
+# polite pause between requests, seconds
+REQUEST_SLEEP = float(os.environ.get("RTS_SLEEP", "0.3" if _ON_VERCEL else "0.6"))
+# per-request socket timeout, seconds
+REQUEST_TIMEOUT = int(os.environ.get("RTS_TIMEOUT", "15" if _ON_VERCEL else "30"))
+# tenacity attempts per request
+MAX_ATTEMPTS = int(os.environ.get("RTS_MAX_ATTEMPTS", "3" if _ON_VERCEL else "6"))
+# max exponential-backoff wait between attempts, seconds
+RETRY_MAX_WAIT = int(os.environ.get("RTS_RETRY_MAX_WAIT", "5" if _ON_VERCEL else "60"))
+# wall-clock budget for one collect() call, seconds; 0 = unlimited
+TIME_BUDGET = float(os.environ.get("RTS_TIME_BUDGET", "250" if _ON_VERCEL else "0"))
+
+_BUDGET_NOTE = "server time budget reached; results are partial"
 
 # A shared session keeps the TCP connection warm across pages.
 _SESSION = requests.Session()
@@ -66,7 +81,7 @@ class _RetryableHTTPError(Exception):
 @retry(
     reraise=True,
     stop=stop_after_attempt(MAX_ATTEMPTS),
-    wait=wait_exponential(multiplier=1, min=1, max=60),
+    wait=wait_exponential(multiplier=1, min=1, max=RETRY_MAX_WAIT),
     retry=retry_if_exception_type(
         (requests.exceptions.RequestException, _RetryableHTTPError)
     ),
@@ -183,6 +198,7 @@ def _collect_kind(
     cap: int | None,
     exclude_usernames: bool,
     keywords: list[str] | None,
+    deadline: float | None,
     progress,
     errors: list[str],
 ) -> list[dict]:
@@ -212,6 +228,11 @@ def _collect_kind(
 
     while True:
         if cap is not None and len(records) >= cap:
+            break
+
+        # Out of wall-clock time (e.g. Vercel's 300s kill) -> stop cleanly.
+        if deadline is not None and time.monotonic() >= deadline:
+            errors.append(f"{subreddit}/{kind}s: stopped early -- {_BUDGET_NOTE}")
             break
 
         src_name, url = sources[src_idx]
@@ -404,6 +425,11 @@ def collect(
     # Lowercase the filter once; _matches() assumes pre-lowercased keywords.
     keywords = [k.lower() for k in keywords if k and k.strip()] if keywords else None
 
+    # Wall-clock deadline (0/unset budget = no deadline). On Vercel this stops
+    # collection ~50s before the platform's 300s hard kill so the workbook and
+    # zip still get built and the user receives partial data, not an error.
+    deadline = (time.monotonic() + TIME_BUDGET) if TIME_BUDGET > 0 else None
+
     # Offline test hook: return deterministic synthetic data, no network.
     if os.environ.get("RTS_FAKE") == "1":
         return _fake_dataset(
@@ -426,7 +452,8 @@ def collect(
         posts.extend(
             _collect_kind(
                 sub, "post", start_ts, end_ts,
-                max_posts_per_sub, exclude_usernames, keywords, progress, errors,
+                max_posts_per_sub, exclude_usernames, keywords, deadline,
+                progress, errors,
             )
         )
 
@@ -436,7 +463,8 @@ def collect(
             comments.extend(
                 _collect_kind(
                     sub, "comment", start_ts, end_ts,
-                    max_comments_per_sub, exclude_usernames, keywords, progress, errors,
+                    max_comments_per_sub, exclude_usernames, keywords, deadline,
+                    progress, errors,
                 )
             )
 
