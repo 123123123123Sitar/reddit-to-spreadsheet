@@ -197,6 +197,9 @@ a { color: var(--accent-ink); }
 }
 .field.is-disabled { opacity: 0.5; }
 .text-input:disabled { cursor: not-allowed; background: #f6f7f9; }
+.field-optional { text-transform: none; letter-spacing: 0; font-weight: 400; }
+.field-help { margin: 7px 0 0; font-size: 0.82rem; color: var(--muted); }
+.topic-field { margin-top: 18px; }
 
 .search-field { margin-bottom: 14px; }
 .search-input {

@@ -143,6 +143,22 @@
           </div>
         </div>
 
+        <div class="field topic-field">
+          <label class="field-label" for="topic">Topic filter <span class="field-optional">(optional)</span></label>
+          <input
+            type="text"
+            id="topic"
+            class="text-input"
+            placeholder="Only keep posts about… e.g. chemotherapy side effects — leave blank for everything"
+            autocomplete="off"
+            maxlength="200"
+          />
+          <p class="field-help">
+            The description is expanded into keywords (synonyms, abbreviations,
+            patient wording) and only posts/comments matching them are exported.
+          </p>
+        </div>
+
         <div class="toggles">
           <label class="toggle">
             <input type="checkbox" id="include-comments" checked />

@@ -12,8 +12,13 @@ Design notes:
   * pullpush is flaky and frequently answers 502. All network reads go through a
     tenacity exponential-backoff retry (~6 attempts) that retries on ``requests``
     transport errors and on HTTP 429/5xx. If a page STILL fails after the
-    retries, we append a human-readable error string to ``errors`` and move on to
-    the next subreddit -- ``collect()`` never raises on network trouble.
+    retries, we record a human-readable error string in ``errors`` and fall back
+    to the arctic_shift API for the remaining window; only when that fails too do
+    we move on to the next subreddit -- ``collect()`` never raises on network
+    trouble.
+  * An optional ``keywords`` list filters records by content: a post/comment is
+    kept only when at least one keyword appears (case-insensitive) in its
+    title+selftext / body. Filtering happens BEFORE the caps are counted.
   * We sleep ~0.6s between requests to stay polite.
   * Setting the env var ``RTS_FAKE=1`` bypasses the network entirely and returns
     a small deterministic synthetic set, so the whole app can be tested offline.
@@ -36,6 +41,11 @@ from tenacity import (
 
 SUBMISSION_URL = "https://api.pullpush.io/reddit/search/submission/"
 COMMENT_URL = "https://api.pullpush.io/reddit/search/comment/"
+
+# arctic_shift (arctic-shift.photon-reddit.com) -- same Reddit record schema as
+# pullpush, used as an automatic fallback when pullpush keeps failing.
+AS_SUBMISSION_URL = "https://arctic-shift.photon-reddit.com/api/posts/search"
+AS_COMMENT_URL = "https://arctic-shift.photon-reddit.com/api/comments/search"
 
 PAGE_SIZE = 100          # size= per page (pullpush max)
 REQUEST_SLEEP = 0.6      # polite pause between requests, seconds
@@ -80,7 +90,9 @@ def _fetch(url: str, params: dict) -> list[dict]:
         raise RuntimeError(f"HTTP {resp.status_code}")
 
     payload = resp.json()
-    data = payload.get("data", [])
+    if isinstance(payload, list):  # tolerate a bare-list response
+        return payload
+    data = payload.get("data", []) if isinstance(payload, dict) else []
     return data if isinstance(data, list) else []
 
 
@@ -126,60 +138,123 @@ def _norm_comment(raw: dict, subreddit: str, exclude_usernames: bool) -> dict:
     }
 
 
+# --- Keyword (topic) filtering ---------------------------------------------
+
+def _matches(record: dict, keywords: list[str] | None) -> bool:
+    """True when the record's text contains any keyword (or no filter is set).
+
+    Keywords are expected pre-lowercased (``collect()`` does this once).
+    """
+    if not keywords:
+        return True
+    if record["kind"] == "post":
+        text = f"{record.get('title') or ''} {record.get('selftext') or ''}"
+    else:
+        text = record.get("body") or ""
+    text = text.lower()
+    return any(kw in text for kw in keywords)
+
+
 # --- Per-subreddit backwards paging ---------------------------------------
+
+def _sources_for(kind: str) -> list[tuple[str, str]]:
+    """Ordered (name, url) data sources for one kind: pullpush, then fallback."""
+    if kind == "post":
+        return [("pullpush", SUBMISSION_URL), ("arctic_shift", AS_SUBMISSION_URL)]
+    return [("pullpush", COMMENT_URL), ("arctic_shift", AS_COMMENT_URL)]
+
+
+def _page_params(source: str, subreddit: str, before: int, after: int) -> dict:
+    """Query params for one page. Both APIs page backwards via before/after."""
+    if source == "pullpush":
+        return {"subreddit": subreddit, "size": PAGE_SIZE, "before": before, "after": after}
+    # arctic_shift: newest-first so the shared cursor stepping works unchanged.
+    return {
+        "subreddit": subreddit, "limit": PAGE_SIZE,
+        "before": before, "after": after, "sort": "desc",
+    }
+
 
 def _collect_kind(
     subreddit: str,
-    url: str,
     kind: str,
     start_ts: int,
     end_ts: int,
     cap: int | None,
     exclude_usernames: bool,
+    keywords: list[str] | None,
     progress,
     errors: list[str],
 ) -> list[dict]:
     """
-    Page one endpoint (submission or comment) for one subreddit, backwards in
-    time from ``end_ts`` down to ``start_ts``.
+    Page one kind (post or comment) for one subreddit, backwards in time from
+    ``end_ts`` down to ``start_ts``. Starts on pullpush; if a page fails even
+    after retries, continues from the same cursor on arctic_shift.
+
+    A source also gets swapped out when it answers the very first page(s) with
+    NO rows at all: pullpush is sometimes "up" but serving an empty index, which
+    is indistinguishable from a genuinely quiet window -- so before believing
+    an empty result we ask the next source.
 
     Termination -- the loop stops on the FIRST of:
-      * an empty page (no more data in range),
+      * an empty page on the LAST source, or after any rows have been seen,
       * a row whose created_utc < start_ts (we've walked past the window),
       * the per-sub ``cap`` being reached,
-      * a page that fails even after retries (error recorded, loop breaks).
+      * a page failing even after retries on the LAST source (error recorded).
     """
     normalize = _norm_post if kind == "post" else _norm_comment
+    sources = _sources_for(kind)
+    src_idx = 0
     records: list[dict] = []
     seen_ids: set[str] = set()
     before = end_ts
+    raw_rows_seen = 0  # in-window rows fetched so far, across all sources
 
     while True:
         if cap is not None and len(records) >= cap:
             break
 
-        params = {
-            "subreddit": subreddit,
-            "size": PAGE_SIZE,
-            "before": before,
-            "after": start_ts,
-        }
+        src_name, url = sources[src_idx]
+        params = _page_params(src_name, subreddit, before, start_ts)
 
         try:
             rows = _fetch(url, params)
         except Exception as exc:  # noqa: BLE001 - deliberate: never crash collect()
             errors.append(
-                f"{subreddit}/{kind}s: gave up after {MAX_ATTEMPTS} attempts "
-                f"(before={before}): {type(exc).__name__}: {exc}"
+                f"{subreddit}/{kind}s: {src_name} gave up after {MAX_ATTEMPTS} "
+                f"attempts (before={before}): {type(exc).__name__}: {exc}"
             )
+            if src_idx + 1 < len(sources):
+                src_idx += 1
+                errors.append(
+                    f"{subreddit}/{kind}s: falling back to {sources[src_idx][0]} "
+                    f"for the rest of the window (before={before})"
+                )
+                if progress:
+                    progress(
+                        f"  {subreddit}: {src_name} failing, switching to "
+                        f"{sources[src_idx][0]} for {kind}s"
+                    )
+                continue
             break
 
         # Polite pause between requests.
         time.sleep(REQUEST_SLEEP)
 
-        # Empty page -> nothing left in range.
+        # Empty page -> nothing left in range... unless this source never
+        # produced a single row, in which case double-check on the next one.
         if not rows:
+            if raw_rows_seen == 0 and src_idx + 1 < len(sources):
+                src_idx += 1
+                if progress:
+                    progress(
+                        f"  {subreddit}: {src_name} returned no {kind}s, "
+                        f"double-checking on {sources[src_idx][0]}"
+                    )
+                continue
             break
+
+        raw_rows_seen += len(rows)
 
         page_min: int | None = None
         stop = False
@@ -203,7 +278,10 @@ def _collect_kind(
             if rid:
                 seen_ids.add(rid)
 
-            records.append(normalize(raw, subreddit, exclude_usernames))
+            record = normalize(raw, subreddit, exclude_usernames)
+            if not _matches(record, keywords):
+                continue
+            records.append(record)
 
             if cap is not None and len(records) >= cap:
                 stop = True
@@ -238,12 +316,14 @@ def _fake_dataset(
     max_posts_per_sub: int | None,
     max_comments_per_sub: int | None,
     exclude_usernames: bool,
+    keywords: list[str] | None,
     progress,
 ) -> dict:
     """
     Deterministic offline dataset: 3 posts + 5 comments per subreddit, all
     timestamped inside the requested window. Exercises author normalization
-    (one deleted author per group) and respects caps + include_comments.
+    (one deleted author per group) and respects caps, include_comments, and
+    the keyword filter (applied through the same ``_matches`` helper).
     """
     posts: list[dict] = []
     comments: list[dict] = []
@@ -268,7 +348,9 @@ def _fake_dataset(
                 "num_comments": 5,
                 "permalink": f"/r/{sub}/comments/fp_{si}_{i}/synthetic_post_{i}/",
             }
-            posts.append(_norm_post(raw, sub, exclude_usernames))
+            record = _norm_post(raw, sub, exclude_usernames)
+            if _matches(record, keywords):
+                posts.append(record)
 
         if include_comments:
             n_comments = 5 if max_comments_per_sub is None else min(5, max_comments_per_sub)
@@ -285,7 +367,9 @@ def _fake_dataset(
                     "parent_id": f"t3_fp_{si}_0",
                     "permalink": f"/r/{sub}/comments/fp_{si}_0/synthetic_post_0/fc_{si}_{j}/",
                 }
-                comments.append(_norm_comment(raw, sub, exclude_usernames))
+                record = _norm_comment(raw, sub, exclude_usernames)
+                if _matches(record, keywords):
+                    comments.append(record)
 
     return {"posts": posts, "comments": comments, "errors": []}
 
@@ -300,22 +384,32 @@ def collect(
     max_posts_per_sub: int | None = 500,
     max_comments_per_sub: int | None = 2000,
     exclude_usernames: bool = False,
+    keywords: list[str] | None = None,
     progress=None,
 ) -> dict:
     """
-    Collect posts (and optionally comments) for each subreddit from pullpush.io.
+    Collect posts (and optionally comments) for each subreddit, from pullpush.io
+    with an automatic per-subreddit fallback to arctic_shift.
+
+    ``keywords``, when given, keeps only records whose text contains at least
+    one keyword (case-insensitive); caps count the records that MATCH.
 
     Returns ``{"posts": [...], "comments": [...], "errors": [...]}``. Never
     raises on network failure -- a subreddit/endpoint that keeps failing after
-    retries contributes an entry to ``errors`` and collection continues.
+    retries (on both sources) contributes entries to ``errors`` and collection
+    continues.
 
     ``progress``, if supplied, is called as ``progress(str)`` for logging.
     """
+    # Lowercase the filter once; _matches() assumes pre-lowercased keywords.
+    keywords = [k.lower() for k in keywords if k and k.strip()] if keywords else None
+
     # Offline test hook: return deterministic synthetic data, no network.
     if os.environ.get("RTS_FAKE") == "1":
         return _fake_dataset(
             subreddits, start_ts, end_ts, include_comments,
-            max_posts_per_sub, max_comments_per_sub, exclude_usernames, progress,
+            max_posts_per_sub, max_comments_per_sub, exclude_usernames,
+            keywords, progress,
         )
 
     posts: list[dict] = []
@@ -331,8 +425,8 @@ def collect(
             progress(f"Collecting posts for r/{sub} ...")
         posts.extend(
             _collect_kind(
-                sub, SUBMISSION_URL, "post", start_ts, end_ts,
-                max_posts_per_sub, exclude_usernames, progress, errors,
+                sub, "post", start_ts, end_ts,
+                max_posts_per_sub, exclude_usernames, keywords, progress, errors,
             )
         )
 
@@ -341,8 +435,8 @@ def collect(
                 progress(f"Collecting comments for r/{sub} ...")
             comments.extend(
                 _collect_kind(
-                    sub, COMMENT_URL, "comment", start_ts, end_ts,
-                    max_comments_per_sub, exclude_usernames, progress, errors,
+                    sub, "comment", start_ts, end_ts,
+                    max_comments_per_sub, exclude_usernames, keywords, progress, errors,
                 )
             )
 

@@ -9,7 +9,8 @@
       women's-health community and it surfaces other women's-health ones).
     - A single selection set feeds a side "Selected" tray.
     - Quick-set presets for the caps and the date window.
-    - POST to /api/collect, stream back the .xlsx, and report the run time.
+    - POST to /api/collect, stream back the .zip bundle (.xlsx + raw
+      .ndjson.zst files), and report the run time.
 */
 (function () {
   "use strict";
@@ -36,6 +37,7 @@
   const maxCommentsEl    = $("max-comments");
   const includeCommentsEl= $("include-comments");
   const excludeNamesEl   = $("exclude-usernames");
+  const topicEl          = $("topic");
   const generateBtn      = $("generate");
   const generateLabel    = $("generate-label");
   const spinnerEl        = $("spinner");
@@ -383,6 +385,7 @@
       exclude_usernames: excludeNamesEl.checked,
       max_posts_per_sub: toInt(maxPostsEl.value, 500),
       max_comments_per_sub: toInt(maxCommentsEl.value, 2000),
+      topic: topicEl.value.trim(),
     };
   }
 
@@ -427,13 +430,16 @@
             throw new Error(t || ("Request failed (HTTP " + res.status + ")."));
           });
         }
-        const fname = filenameFromDisposition(res.headers.get("Content-Disposition"), "reddit_export.xlsx");
+        const fname = filenameFromDisposition(res.headers.get("Content-Disposition"), "reddit_export.zip");
         const num = (h) => { const n = parseInt(res.headers.get(h), 10); return Number.isFinite(n) ? n : 0; };
+        let keywords = res.headers.get("X-Collect-Keywords") || "";
+        try { keywords = decodeURIComponent(keywords); } catch (e) { /* show raw */ }
         const counts = {
           posts: num("X-Collect-Posts"),
           comments: num("X-Collect-Comments"),
           errors: num("X-Collect-Errors"),
           serverSecs: res.headers.get("X-Collect-Seconds") || null,
+          keywords,
         };
         return res.blob().then((blob) => ({ blob, fname, counts }));
       })
@@ -444,19 +450,22 @@
         const c = out.counts;
         console.log("[reddit-to-spreadsheet] workflow completed in " + secs + "s",
           { posts: c.posts, comments: c.comments, errors: c.errors, serverSeconds: c.serverSecs });
+        const filterNote = c.keywords ? " (filtered by: " + c.keywords + ")" : "";
         if (c.posts + c.comments === 0) {
           showStatus(
-            "Finished in " + secs + "s, but no posts or comments matched that window, so " +
-              out.fname + " is empty. " +
+            "Finished in " + secs + "s, but no posts or comments matched that window" +
+              (c.keywords ? " and topic filter (keywords: " + c.keywords + ")" : "") +
+              ", so " + out.fname + " is empty. " +
               (c.errors
-                ? "pullpush returned " + c.errors + " error(s) — it may be down right now; try again shortly."
-                : "Try a wider date range or different communities."),
+                ? "The data sources returned " + c.errors + " error(s) — they may be down right now; try again shortly."
+                : "Try a wider date range" + (c.keywords ? ", a broader topic," : "") + " or different communities."),
             "warn"
           );
         } else {
           let msg = "Done in " + secs + "s — exported " + c.posts + " posts and " +
-            c.comments + " comments to " + out.fname + ".";
-          if (c.errors) msg += " Note: pullpush returned " + c.errors + " error(s), so some data may be missing.";
+            c.comments + " comments to " + out.fname +
+            " (.xlsx + raw .ndjson.zst inside)" + filterNote + ".";
+          if (c.errors) msg += " Note: the data sources returned " + c.errors + " error(s), so some data may be missing.";
           showStatus(msg, c.errors ? "warn" : "ok");
         }
       })
@@ -577,8 +586,10 @@
     [
       ["Communities", subs.length ? subs.length + " selected" : "none selected"],
       ["Window", dash(startDateEl.value) + "  →  " + dash(endDateEl.value)],
+      ["Topic", topicEl.value.trim() ? '"' + topicEl.value.trim() + '"' : "everything"],
       ["Per subreddit", perSub],
       ["Usernames", excludeNamesEl.checked ? "excluded" : "included"],
+      ["Download", ".zip — spreadsheet + raw .ndjson.zst"],
     ].forEach(([k, v]) => {
       const row = el("div", { class: "recap-row" });
       row.appendChild(el("span", { class: "recap-k", text: k }));

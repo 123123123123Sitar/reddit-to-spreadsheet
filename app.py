@@ -21,12 +21,15 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import re
 import time
+import urllib.parse
 from datetime import datetime, timezone
 
 import requests
 from flask import Flask, Response, jsonify, request, send_from_directory
 
+import bundle
 import collector
 import spreadsheet
 import subreddits
@@ -203,6 +206,78 @@ def _mercury_chat(message: str) -> dict | None:
     }
 
 
+# --- Topic filter: free text -> keyword list ------------------------------- #
+_KEYWORD_STOPWORDS = {
+    "a", "an", "and", "about", "are", "as", "at", "be", "by", "for", "from",
+    "has", "have", "how", "i", "in", "is", "it", "its", "me", "my", "of", "on",
+    "only", "or", "posts", "talk", "that", "the", "their", "them", "they",
+    "thing", "things", "this", "to", "was", "were", "what", "when", "which",
+    "will", "with",
+}
+
+
+def _mercury_keywords(topic: str) -> list[str] | None:
+    """Expand a topic description into search keywords via Mercury 2."""
+    if os.environ.get("RTS_FAKE") == "1":
+        return None
+    key = _mercury_key()
+    if not key:
+        return None
+    prompt = (
+        'A researcher only wants Reddit posts/comments about: "' + topic + '". '
+        "List 8 to 15 short lowercase keywords or phrases to match such text: "
+        "the core terms plus common synonyms, abbreviations, and everyday "
+        "patient wording. Text matching ANY keyword (case-insensitive "
+        "substring) is kept, so keep each keyword specific to the topic. "
+        'Respond as JSON: {"keywords":["..."]}'
+    )
+    try:
+        resp = requests.post(
+            MERCURY_URL,
+            timeout=20,
+            headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+            json={
+                "model": MERCURY_MODEL,
+                "temperature": 0.3,
+                "response_format": {"type": "json_object"},
+                "messages": [
+                    {"role": "system", "content": "You build keyword filters for Reddit health-community text. Respond as JSON."},
+                    {"role": "user", "content": prompt},
+                ],
+            },
+        )
+        resp.raise_for_status()
+        data = json.loads(resp.json()["choices"][0]["message"]["content"])
+    except Exception:  # noqa: BLE001 - any failure falls back
+        app.logger.exception("mercury keywords failed")
+        return None
+
+    out, seen = [], set()
+    for item in data.get("keywords", []) if isinstance(data, dict) else []:
+        kw = str(item).strip().lower()
+        if kw and kw not in seen:
+            seen.add(kw)
+            out.append(kw)
+    return out[:20] or None
+
+
+def _fallback_keywords(topic: str) -> list[str]:
+    """Keyword list from the topic text itself when Mercury is unavailable."""
+    topic = topic.strip().lower()
+    if not topic:
+        return []
+    out, seen = [], set()
+    words = re.findall(r"[a-z0-9']+", topic)
+    if len(words) > 1:  # the full phrase matches most precisely; try it first
+        seen.add(topic)
+        out.append(topic)
+    for w in words:
+        if len(w) >= 3 and w not in _KEYWORD_STOPWORDS and w not in seen:
+            seen.add(w)
+            out.append(w)
+    return out or [topic]
+
+
 def _fallback_chat(message: str) -> dict:
     """Keyword match a condition description to subreddits when Mercury is off."""
     msg = message.lower()
@@ -237,10 +312,12 @@ def _fallback_chat(message: str) -> dict:
         reply = "I couldn't map that to a community — try naming a condition, e.g. lupus."
     return {"reply": reply, "subreddits": names}
 
-# XLSX MIME type used both for the response Content-Type and by the tests.
+# XLSX MIME type of the workbook inside the bundle (also used by the tests).
 XLSX_MIMETYPE = (
     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 )
+# The download itself is a .zip bundle: the .xlsx plus raw .ndjson.zst files.
+ZIP_MIMETYPE = "application/zip"
 
 # One day in seconds -- used to make the end date *exclusive* (see below).
 _ONE_DAY = 86400
@@ -311,7 +388,8 @@ def _clean_subreddits(value):
 
 
 def _safe_filename(subs):
-    """Build a filesystem/header safe .xlsx filename from the sub names."""
+    """Build a filesystem/header safe base filename (no extension) from the
+    sub names; callers append ``.zip`` / ``.xlsx`` as needed."""
     parts = []
     for name in subs:
         safe = "".join(ch for ch in name if ch.isalnum() or ch in "_-")
@@ -320,7 +398,7 @@ def _safe_filename(subs):
     joined = "-".join(parts) if parts else "export"
     if len(joined) > 80:  # keep the Content-Disposition header sensible
         joined = f"{joined[:80]}_and_more"
-    return f"reddit_export_{joined}.xlsx"
+    return f"reddit_export_{joined}"
 
 
 # --------------------------------------------------------------------------- #
@@ -412,7 +490,8 @@ def api_chat():
 
 @app.post("/api/collect")
 def api_collect():
-    """Validate input, collect the data, and return an .xlsx download."""
+    """Validate input, collect the data, and return a .zip download
+    (the .xlsx workbook plus raw per-subreddit .ndjson.zst files)."""
     # --- parse + validate input (any failure -> HTTP 400) ----------------- #
     try:
         payload = request.get_json(silent=True)
@@ -440,8 +519,15 @@ def api_collect():
         max_comments = _parse_cap(
             payload.get("max_comments_per_sub"), "max_comments_per_sub", 2000
         )
+        topic = str(payload.get("topic") or "").strip()[:200]
     except ValidationError as exc:
         return jsonify({"error": str(exc)}), 400
+
+    # Optional topic filter: expand the description into keywords (Mercury 2,
+    # falling back to the words the user typed).
+    keywords = (_mercury_keywords(topic) or _fallback_keywords(topic)) if topic else []
+    if keywords:
+        app.logger.info("collect: topic %r -> keywords %s", topic, keywords)
 
     # --- collect + build workbook (any failure -> HTTP 500) --------------- #
     started = time.monotonic()
@@ -454,12 +540,15 @@ def api_collect():
             max_posts_per_sub=max_posts,
             max_comments_per_sub=max_comments,
             exclude_usernames=exclude_usernames,
+            keywords=keywords or None,
             progress=lambda msg: app.logger.info("collect: %s", msg),
         )
         posts = result.get("posts", [])
         comments = result.get("comments", [])
         errors = result.get("errors", [])
+        base_name = _safe_filename(subs)
         xlsx_bytes = spreadsheet.build_workbook_bytes(posts, comments)
+        zip_bytes = bundle.build_zip_bytes(posts, comments, xlsx_bytes, base_name)
     except Exception as exc:  # noqa: BLE001 - any collect failure is a 500
         app.logger.exception("collection failed")
         return jsonify({"error": f"Collection failed: {exc}"}), 500
@@ -470,16 +559,18 @@ def api_collect():
         len(posts), len(comments), len(errors), elapsed, ",".join(subs),
     )
 
-    filename = _safe_filename(subs)
     headers = {
-        "Content-Disposition": f'attachment; filename="{filename}"',
+        "Content-Disposition": f'attachment; filename="{base_name}.zip"',
         # Surface per-subreddit (non-fatal) errors + counts + timing to the UI.
         "X-Collect-Errors": str(len(errors)),
         "X-Collect-Posts": str(len(posts)),
         "X-Collect-Comments": str(len(comments)),
         "X-Collect-Seconds": f"{elapsed:.1f}",
     }
-    return Response(xlsx_bytes, mimetype=XLSX_MIMETYPE, headers=headers)
+    if keywords:
+        # URL-encoded so the header stays latin-1 safe; the UI decodes it.
+        headers["X-Collect-Keywords"] = urllib.parse.quote(", ".join(keywords))[:1000]
+    return Response(zip_bytes, mimetype=ZIP_MIMETYPE, headers=headers)
 
 
 if __name__ == "__main__":

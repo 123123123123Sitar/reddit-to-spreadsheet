@@ -12,20 +12,30 @@ Run from the repo root::
 from __future__ import annotations
 
 import io
+import json
 import os
 import sys
+import zipfile
 
 import openpyxl
 import pytest
+import zstandard
 
 # Make the repo root importable no matter where pytest is invoked from.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import app as app_module  # noqa: E402
+import bundle  # noqa: E402
 import collector  # noqa: E402
 import spreadsheet  # noqa: E402
 
 XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+ZIP_MIME = "application/zip"
+
+
+def _read_ndjson_zst(raw: bytes) -> list[dict]:
+    text = zstandard.ZstdDecompressor().decompress(raw).decode("utf-8")
+    return [json.loads(line) for line in text.splitlines() if line]
 
 
 # --------------------------------------------------------------------------- #
@@ -145,7 +155,7 @@ def client():
     return app_module.app.test_client()
 
 
-def test_collect_endpoint_returns_valid_xlsx(client, monkeypatch):
+def test_collect_endpoint_returns_valid_zip_bundle(client, monkeypatch):
     monkeypatch.setenv("RTS_FAKE", "1")
 
     resp = client.post(
@@ -162,14 +172,154 @@ def test_collect_endpoint_returns_valid_xlsx(client, monkeypatch):
     )
 
     assert resp.status_code == 200
-    assert resp.mimetype == XLSX_MIME
+    assert resp.mimetype == ZIP_MIME
     assert "attachment" in resp.headers.get("Content-Disposition", "")
-    assert resp.headers["Content-Disposition"].endswith('.xlsx"')
+    assert resp.headers["Content-Disposition"].endswith('.zip"')
 
-    # The body must reopen as a valid workbook with the expected sheets.
-    wb = openpyxl.load_workbook(io.BytesIO(resp.data))
+    zf = zipfile.ZipFile(io.BytesIO(resp.data))
+    names = zf.namelist()
+
+    # The workbook inside the bundle must reopen with the expected sheets.
+    xlsx_names = [n for n in names if n.endswith(".xlsx")]
+    assert len(xlsx_names) == 1
+    wb = openpyxl.load_workbook(io.BytesIO(zf.read(xlsx_names[0])))
     assert "Posts" in wb.sheetnames
     assert "Summary" in wb.sheetnames
+
+    # Raw .ndjson.zst dumps: line counts must equal the reported counts.
+    assert "raw/endometriosis_posts.ndjson.zst" in names
+    assert "raw/endometriosis_comments.ndjson.zst" in names
+    posts = _read_ndjson_zst(zf.read("raw/endometriosis_posts.ndjson.zst"))
+    comments = _read_ndjson_zst(zf.read("raw/endometriosis_comments.ndjson.zst"))
+    assert len(posts) == int(resp.headers["X-Collect-Posts"]) > 0
+    assert len(comments) == int(resp.headers["X-Collect-Comments"]) > 0
+    assert all(p["kind"] == "post" and p["subreddit"] == "endometriosis" for p in posts)
+    assert all("body" in c for c in comments)
+
+
+def test_collect_endpoint_topic_filter(client, monkeypatch):
+    # Fake posts are titled "[sub] Synthetic post #N"; comments say
+    # "Fake comment N on a post ...". A topic of "synthetic" (fallback keyword
+    # expansion, since RTS_FAKE skips Mercury) must keep posts but no comments.
+    monkeypatch.setenv("RTS_FAKE", "1")
+
+    resp = client.post(
+        "/api/collect",
+        json={
+            "subreddits": ["endometriosis"],
+            "start_date": "2023-11-01",
+            "end_date": "2023-11-30",
+            "topic": "synthetic",
+        },
+    )
+
+    assert resp.status_code == 200
+    assert int(resp.headers["X-Collect-Posts"]) > 0
+    assert int(resp.headers["X-Collect-Comments"]) == 0
+    assert "synthetic" in resp.headers.get("X-Collect-Keywords", "")
+
+    # No comment matched -> no comments dump in the bundle.
+    names = zipfile.ZipFile(io.BytesIO(resp.data)).namelist()
+    assert "raw/endometriosis_posts.ndjson.zst" in names
+    assert "raw/endometriosis_comments.ndjson.zst" not in names
+
+
+def test_fallback_keywords():
+    kws = app_module._fallback_keywords("Chemotherapy and hair loss")
+    assert "chemotherapy and hair loss" in kws  # full phrase first
+    assert "chemotherapy" in kws and "hair" in kws and "loss" in kws
+    assert "and" not in kws  # stopword dropped
+    assert app_module._fallback_keywords("") == []
+    assert app_module._fallback_keywords("lupus") == ["lupus"]
+
+
+def test_bundle_groups_by_subreddit():
+    zip_bytes = bundle.build_zip_bytes(
+        _stub_posts(),
+        _stub_comments(),
+        spreadsheet.build_workbook_bytes(_stub_posts(), _stub_comments()),
+        "reddit_export_test",
+    )
+    zf = zipfile.ZipFile(io.BytesIO(zip_bytes))
+    assert "reddit_export_test.xlsx" in zf.namelist()
+    posts = _read_ndjson_zst(zf.read("raw/endometriosis_posts.ndjson.zst"))
+    assert [p["id"] for p in posts] == ["p1", "p2"]
+    comments = _read_ndjson_zst(zf.read("raw/endometriosis_comments.ndjson.zst"))
+    assert len(comments) == 3
+
+
+def test_collector_arctic_shift_fallback(monkeypatch):
+    # pullpush fails outright; arctic_shift serves one page then runs dry.
+    monkeypatch.delenv("RTS_FAKE", raising=False)
+    monkeypatch.setattr(collector, "REQUEST_SLEEP", 0)
+
+    calls = []
+
+    def fake_fetch(url, params):
+        calls.append(url)
+        if "pullpush.io" in url:
+            raise RuntimeError("HTTP 502")
+        if len(calls) <= 2:  # first arctic page has data, the next is empty
+            return [{
+                "id": "as1", "subreddit": "lupus", "created_utc": 1_700_000_100,
+                "author": "arctic_user", "title": "From arctic_shift",
+                "selftext": "fallback works", "score": 1, "num_comments": 0,
+                "permalink": "/r/lupus/comments/as1/",
+            }]
+        return []
+
+    monkeypatch.setattr(collector, "_fetch", fake_fetch)
+
+    result = collector.collect(
+        ["lupus"], 1_700_000_000, 1_700_001_000, include_comments=False,
+    )
+
+    assert [p["id"] for p in result["posts"]] == ["as1"]
+    assert any("falling back to arctic_shift" in e for e in result["errors"])
+    assert any("pullpush" in e for e in result["errors"])
+
+
+def test_collector_arctic_shift_on_empty_pullpush(monkeypatch):
+    # pullpush answers 200 with NO rows (its "up but empty index" mode, which
+    # produced silently empty exports); arctic_shift must be consulted before
+    # believing the window is empty.
+    monkeypatch.delenv("RTS_FAKE", raising=False)
+    monkeypatch.setattr(collector, "REQUEST_SLEEP", 0)
+
+    arctic_pages = []
+
+    def fake_fetch(url, params):
+        if "pullpush.io" in url:
+            return []
+        arctic_pages.append(params)
+        if len(arctic_pages) == 1:
+            return [{
+                "id": "as9", "subreddit": "lupus", "created_utc": 1_700_000_100,
+                "author": "x", "title": "Only arctic has this",
+                "selftext": "", "score": 2, "num_comments": 0,
+                "permalink": "/r/lupus/comments/as9/",
+            }]
+        return []
+
+    monkeypatch.setattr(collector, "_fetch", fake_fetch)
+
+    result = collector.collect(
+        ["lupus"], 1_700_000_000, 1_700_001_000, include_comments=False,
+    )
+
+    assert [p["id"] for p in result["posts"]] == ["as9"]
+    assert result["errors"] == []  # empty-index fallback is not an error
+
+
+def test_collector_keyword_filter_fake(monkeypatch):
+    monkeypatch.setenv("RTS_FAKE", "1")
+    result = collector.collect(
+        ["endometriosis"], 1_700_000_000, 1_700_200_000,
+        keywords=["post #1"],  # matches exactly one synthetic post title
+    )
+    assert len(result["posts"]) == 1
+    assert "#1" in result["posts"][0]["title"]
+    assert result["comments"] == []
 
 
 def test_collect_endpoint_empty_subreddits_is_400(client, monkeypatch):

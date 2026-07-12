@@ -1,6 +1,6 @@
 # reddit-to-spreadsheet
 
-A local web app to pull Reddit posts and comments from selected subreddits (via pullpush.io) and download them as an `.xlsx` spreadsheet.
+A local web app to pull Reddit posts and comments from selected subreddits (via pullpush.io, with an automatic arctic_shift fallback) and download them as a `.zip` bundle: a formatted `.xlsx` spreadsheet plus raw `.ndjson.zst` data files.
 
 ## Quickstart
 
@@ -15,7 +15,18 @@ Then open http://127.0.0.1:5000 in your browser.
 
 ## How it works
 
-Pick one or more subreddits (search, tap a suggestion, or **describe a condition in the chat box** and the relevant communities are auto-selected), set a date window and options, click collect — the app fetches the data from pullpush.io and hands you back a formatted spreadsheet.
+Pick one or more subreddits (search, tap a suggestion, or **describe a condition in the chat box** and the relevant communities are auto-selected), set a date window and options, click collect — the app fetches the data and hands you back a `.zip` bundle.
+
+## What's in the download
+
+Every collect returns one `reddit_export_<subs>.zip` containing:
+
+- `reddit_export_<subs>.xlsx` — the formatted workbook (Posts / Comments / Summary sheets)
+- `raw/<subreddit>_posts.ndjson.zst` and `raw/<subreddit>_comments.ndjson.zst` — the raw records in the pushshift/arctic_shift dump convention: zstandard-compressed NDJSON, one JSON object per line. These feed straight into existing dump tooling (`zstdcat file.ndjson.zst | jq .`). Empty groups produce no file.
+
+## Topic filter
+
+The window step has an optional **topic filter** ("only keep posts about…"). The description is expanded into a keyword list — via Mercury 2 when a key is configured (synonyms, abbreviations, patient wording), otherwise the significant words you typed — and only posts/comments whose title/body contains at least one keyword (case-insensitive) are exported. Filtering happens before the per-subreddit caps are counted, so caps count *matching* records. The `X-Collect-Keywords` response header (URL-encoded) reports the expanded list, and the UI shows it in the status line.
 
 ## AI suggestions & chat (Mercury 2)
 
@@ -46,7 +57,7 @@ pullpush.io is a community mirror and is frequently down or slow (it loves to
 answer `HTTP 502`). To run, test, or demo the app without touching the network,
 set `RTS_FAKE=1`. The collector then returns a small, deterministic synthetic
 dataset (3 posts + 5 comments per subreddit) so the whole stack — UI → collect
-→ `.xlsx` export — works end to end offline:
+→ `.zip` export — works end to end offline:
 
 ```bash
 # Run the app in offline demo mode:
@@ -60,16 +71,19 @@ Note: on macOS, port 5000 may be occupied by the AirPlay Receiver
 (System Settings → General → AirDrop & Handoff). Disable it or change the port
 in `app.py` if `/` returns `403`.
 
-## A note on pullpush reliability
+## Data sources & the arctic_shift fallback
 
 When `RTS_FAKE` is unset the app makes real requests to pullpush.io. That
 service is flaky: individual pages often fail with `502`/timeouts even after the
 built-in exponential-backoff retries (~6 attempts per request). When a
 subreddit/endpoint keeps failing, the collector records a human-readable entry
-in the result's `errors` list and moves on — it never crashes the collection —
-so you may get a partial or empty export during a pullpush outage. Just retry
-later. The `X-Collect-Errors` / `X-Collect-Posts` / `X-Collect-Comments`
-response headers report what actually came back.
+in the result's `errors` list and **automatically continues from the same
+point on the arctic_shift API** (`arctic-shift.photon-reddit.com`), which
+serves the same Reddit record schema. Only when both sources fail does it move
+on — it never crashes the collection — so a partial or empty export now needs
+both mirrors to be down at once. The `X-Collect-Errors` / `X-Collect-Posts` /
+`X-Collect-Comments` response headers report what actually came back, and the
+errors list says which source failed and where the fallback kicked in.
 
 ## Data & ethics
 
