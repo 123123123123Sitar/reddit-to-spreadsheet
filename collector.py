@@ -184,8 +184,10 @@ def _page_params(source: str, subreddit: str, before: int, after: int) -> dict:
     if source == "pullpush":
         return {"subreddit": subreddit, "size": PAGE_SIZE, "before": before, "after": after}
     # arctic_shift: newest-first so the shared cursor stepping works unchanged.
+    # limit=auto returns 100-1000 rows per page depending on server capacity --
+    # roughly 10x pullpush's throughput, which is what makes big pulls viable.
     return {
-        "subreddit": subreddit, "limit": PAGE_SIZE,
+        "subreddit": subreddit, "limit": "auto",
         "before": before, "after": after, "sort": "desc",
     }
 
@@ -201,7 +203,7 @@ def _collect_kind(
     deadline: float | None,
     progress,
     errors: list[str],
-) -> list[dict]:
+) -> tuple[list[dict], dict]:
     """
     Page one kind (post or comment) for one subreddit, backwards in time from
     ``end_ts`` down to ``start_ts``. Starts on pullpush; if a page fails even
@@ -217,6 +219,12 @@ def _collect_kind(
       * a row whose created_utc < start_ts (we've walked past the window),
       * the per-sub ``cap`` being reached,
       * a page failing even after retries on the LAST source (error recorded).
+
+    Returns ``(records, state)`` where ``state`` is
+    ``{"next_before": int, "done": bool}`` -- ``done`` is True when the window
+    is genuinely exhausted; otherwise a follow-up call with
+    ``end_ts=next_before`` resumes where this one stopped (the chunked
+    deep-pull API relies on this).
     """
     normalize = _norm_post if kind == "post" else _norm_comment
     sources = _sources_for(kind)
@@ -225,6 +233,7 @@ def _collect_kind(
     seen_ids: set[str] = set()
     before = end_ts
     raw_rows_seen = 0  # in-window rows fetched so far, across all sources
+    exhausted = False  # True only when the window has no more data
 
     while True:
         if cap is not None and len(records) >= cap:
@@ -274,12 +283,14 @@ def _collect_kind(
                         f"double-checking on {sources[src_idx][0]}"
                     )
                 continue
+            exhausted = True
             break
 
         raw_rows_seen += len(rows)
 
         page_min: int | None = None
-        stop = False
+        past_start = False
+        cap_hit = False
 
         for raw in rows:
             cu = raw.get("created_utc")
@@ -291,7 +302,7 @@ def _collect_kind(
 
             # Walked past the start of the window; stop after this page.
             if cu < start_ts:
-                stop = True
+                past_start = True
                 continue
 
             rid = str(raw.get("id", ""))
@@ -306,13 +317,16 @@ def _collect_kind(
             records.append(record)
 
             if cap is not None and len(records) >= cap:
-                stop = True
+                cap_hit = True
                 break
 
         if progress:
             progress(f"  {subreddit}: {len(records)} {kind}s so far")
 
-        if stop or page_min is None:
+        if cap_hit:
+            break  # cap reached mid-page; the window may hold more
+        if past_start or page_min is None:
+            exhausted = True
             break
 
         # Step the window down. `before` is exclusive on pullpush, so setting it
@@ -322,10 +336,11 @@ def _collect_kind(
         if next_before >= before:
             next_before = before - 1
         if next_before < start_ts:
+            exhausted = True
             break
         before = next_before
 
-    return records
+    return records, {"next_before": before, "done": exhausted}
 
 
 # --- Synthetic test data (RTS_FAKE=1) -------------------------------------
@@ -472,7 +487,7 @@ def collect(
             progress(f"Collecting {kind}s for r/{sub} ...")
         # Dedicated communities skip the topic filter -- everything is on-topic.
         kw = None if sub.lower() in exempt else keywords
-        found = _collect_kind(
+        found, _state = _collect_kind(
             sub, kind, start_ts, end_ts,
             cap, exclude_usernames, kw, deadline, progress, errors,
         )

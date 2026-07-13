@@ -299,6 +299,16 @@ def _heuristic_dedicated(topic: str, subs: list[str]) -> set[str]:
     return {s.lower() for s in subs if t in _squash(s)}
 
 
+def _topic_plan(topic: str, subs: list[str]) -> tuple[list[str], set[str]]:
+    """Expand a topic into (keywords, exempt-lowercase-sub-names)."""
+    if not topic:
+        return [], set()
+    plan = _mercury_topic_plan(topic, subs)
+    keywords = (plan or {}).get("keywords") or _fallback_keywords(topic)
+    exempt = _heuristic_dedicated(topic, subs) | (plan or {}).get("dedicated", set())
+    return keywords, exempt
+
+
 def _fallback_keywords(topic: str) -> list[str]:
     """Keyword list from the topic text itself when Mercury is unavailable."""
     topic = topic.strip().lower()
@@ -526,6 +536,105 @@ def api_chat():
     return jsonify({"reply": result.get("reply", ""), "subreddits": clean[:16]})
 
 
+@app.post("/api/expand_topic")
+def api_expand_topic():
+    """Expand a topic once for a deep pull: keywords + dedicated subreddits."""
+    payload = request.get_json(silent=True) or {}
+    topic = str(payload.get("topic") or "").strip()[:200]
+    try:
+        subs = _clean_subreddits(payload.get("subreddits"))
+    except ValidationError as exc:
+        return jsonify({"error": str(exc)}), 400
+    keywords, exempt = _topic_plan(topic, subs)
+    return jsonify({
+        "keywords": keywords,
+        "dedicated": [s for s in subs if s.lower() in exempt],
+    })
+
+
+# One deep-pull chunk must finish well inside Vercel's 300s kill window;
+# compression and response overhead get the remaining slack.
+_CHUNK_BUDGET = float(os.environ.get("RTS_CHUNK_BUDGET", "220"))
+
+
+@app.post("/api/collect_chunk")
+def api_collect_chunk():
+    """One resumable slice of a deep pull: raw zstd NDJSON + a resume cursor.
+
+    The browser drives many of these sequentially (each well under the
+    serverless time limit) and concatenates the response bodies -- zstd frames
+    concatenate into one valid .ndjson.zst stream. ``X-Chunk-Done: 1`` means
+    the window is exhausted; otherwise resume with ``before`` set to
+    ``X-Chunk-Next-Before``.
+    """
+    try:
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            raise ValidationError("Request body must be a JSON object.")
+        sub = _clean_subreddits([payload.get("subreddit")])[0]
+        kind = payload.get("kind")
+        if kind not in ("post", "comment"):
+            raise ValidationError("'kind' must be 'post' or 'comment'.")
+        before = payload.get("before")
+        after = payload.get("after")
+        if (
+            isinstance(before, bool) or not isinstance(before, int)
+            or isinstance(after, bool) or not isinstance(after, int)
+            or after < 0 or before <= after
+        ):
+            raise ValidationError(
+                "'before'/'after' must be unix timestamps with after < before."
+            )
+        exclude_usernames = bool(payload.get("exclude_usernames", False))
+        raw_kw = payload.get("keywords")
+        keywords = None
+        if isinstance(raw_kw, list):
+            cleaned_kw = [str(k).strip().lower() for k in raw_kw if str(k).strip()]
+            keywords = cleaned_kw[:30] or None
+    except ValidationError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+    errors: list[str] = []
+    try:
+        if os.environ.get("RTS_FAKE") == "1":
+            fake = collector.collect(
+                [sub], after, before,
+                include_comments=(kind == "comment"),
+                exclude_usernames=exclude_usernames,
+                keywords=keywords,
+            )
+            records = fake["posts"] if kind == "post" else fake["comments"]
+            state = {"next_before": after, "done": True}
+        else:
+            deadline = time.monotonic() + _CHUNK_BUDGET
+            records, state = collector._collect_kind(
+                sub, kind, after, before,
+                None, exclude_usernames, keywords, deadline,
+                lambda msg: app.logger.info("chunk: %s", msg), errors,
+            )
+        body = bundle.ndjson_zst_bytes(records) if records else b""
+    except Exception as exc:  # noqa: BLE001 - any chunk failure is a 500
+        app.logger.exception("chunk failed")
+        return jsonify({"error": f"Chunk failed: {exc}"}), 500
+
+    # Hitting the chunk budget is the expected way a chunk ends, not an error.
+    real_errors = [e for e in errors if collector._BUDGET_NOTE not in e]
+    app.logger.info(
+        "chunk done: %s/%ss %d records, done=%s, next_before=%s, %d error(s)",
+        sub, kind, len(records), state["done"], state["next_before"], len(real_errors),
+    )
+    return Response(
+        body,
+        mimetype="application/zstd",
+        headers={
+            "X-Chunk-Records": str(len(records)),
+            "X-Chunk-Done": "1" if state["done"] else "0",
+            "X-Chunk-Next-Before": str(state["next_before"]),
+            "X-Chunk-Errors": str(len(real_errors)),
+        },
+    )
+
+
 @app.post("/api/collect")
 def api_collect():
     """Validate input, collect the data, and return a .zip download
@@ -566,12 +675,8 @@ def api_collect():
     # subreddits are already dedicated to the topic -- those are exported in
     # full, since keyword-filtering a dedicated community only loses relevant
     # posts that don't happen to name the topic.
-    keywords: list[str] = []
-    exempt: set[str] = set()
+    keywords, exempt = _topic_plan(topic, subs)
     if topic:
-        plan = _mercury_topic_plan(topic, subs)
-        keywords = (plan or {}).get("keywords") or _fallback_keywords(topic)
-        exempt = _heuristic_dedicated(topic, subs) | (plan or {}).get("dedicated", set())
         app.logger.info(
             "collect: topic %r -> keywords %s, unfiltered subs %s",
             topic, keywords, sorted(exempt) or "none",

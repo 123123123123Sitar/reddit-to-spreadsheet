@@ -180,6 +180,20 @@
 
         <div class="recap" id="export-recap"></div>
 
+        <div class="deep-pull">
+          <label class="toggle">
+            <input type="checkbox" id="deep-pull" />
+            <span>Deep pull — fetch <strong>everything</strong> in the window</span>
+          </label>
+          <p class="field-help">
+            Streams the complete data as raw <code>.ndjson.zst</code> files
+            (one per subreddit per kind), ignoring the caps. Millions of
+            records are fine — big pulls can take 30+ minutes, so keep this
+            tab open. No spreadsheet is built in this mode. Click the button
+            again to stop early and keep what's already collected.
+          </p>
+        </div>
+
         <button type="button" class="btn-primary" id="generate">
           <span class="spinner" id="spinner" hidden aria-hidden="true"></span>
           <span class="btn-label" id="generate-label">Generate spreadsheet</span>

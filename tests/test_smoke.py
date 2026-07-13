@@ -15,6 +15,7 @@ import io
 import json
 import os
 import sys
+import time
 import zipfile
 
 import openpyxl
@@ -281,6 +282,83 @@ def test_collect_endpoint_dedicated_sub_unfiltered(client, monkeypatch):
     assert int(resp.headers["X-Collect-Posts"]) == 6      # 3 unfiltered + 3 match
     assert int(resp.headers["X-Collect-Comments"]) == 5   # exempt sub only
     assert resp.headers.get("X-Collect-Unfiltered") == "synthetic_support"
+
+
+def test_expand_topic_endpoint(client, monkeypatch):
+    monkeypatch.setenv("RTS_FAKE", "1")  # skip Mercury -> fallback + heuristic
+    resp = client.post(
+        "/api/expand_topic",
+        json={"topic": "breast cancer", "subreddits": ["BreastCancer", "cancer"]},
+    )
+    assert resp.status_code == 200
+    data = resp.get_json()
+    assert "breast cancer" in data["keywords"]
+    assert data["dedicated"] == ["BreastCancer"]
+
+
+def test_collect_chunk_endpoint_fake(client, monkeypatch):
+    monkeypatch.setenv("RTS_FAKE", "1")
+    resp = client.post(
+        "/api/collect_chunk",
+        json={
+            "subreddit": "endometriosis", "kind": "post",
+            "before": 1_700_200_000, "after": 1_700_000_000,
+        },
+    )
+    assert resp.status_code == 200
+    assert resp.headers["X-Chunk-Done"] == "1"
+    assert int(resp.headers["X-Chunk-Records"]) == 3
+    records = _read_ndjson_zst(resp.data)
+    assert len(records) == 3
+    assert all(r["kind"] == "post" for r in records)
+
+    bad = client.post(
+        "/api/collect_chunk",
+        json={"subreddit": "x", "kind": "post", "before": 5, "after": 9},
+    )
+    assert bad.status_code == 400
+
+
+def test_collect_kind_resumes_from_cursor(monkeypatch):
+    # Chunked deep pulls rely on (records, state): a deadline-cut call reports
+    # done=False and a cursor, and a follow-up call from that cursor continues
+    # with the OLDER rows, eventually reporting done=True.
+    monkeypatch.delenv("RTS_FAKE", raising=False)
+    monkeypatch.setattr(collector, "REQUEST_SLEEP", 0)
+
+    # 3 pages of 2 rows each, newest-first: ts 100..95.
+    all_rows = [
+        {"id": f"p{ts}", "subreddit": "lupus", "created_utc": ts, "author": "a",
+         "title": f"t{ts}", "selftext": "", "score": 1, "num_comments": 0,
+         "permalink": "/p"}
+        for ts in range(100, 94, -1)
+    ]
+
+    def fake_fetch(url, params):
+        time.sleep(0.06)  # longer than the 0.05s budget -> expires after page 1
+        rows = [r for r in all_rows if r["created_utc"] < params["before"]]
+        return rows[:2]
+
+    monkeypatch.setattr(collector, "_fetch", fake_fetch)
+
+    # First call: the deadline expires while page 1 is in flight, so the
+    # loop-top check cuts the task before page 2.
+    errors = []
+    first, state = collector._collect_kind(
+        "lupus", "post", 0, 101, None, False, None,
+        time.monotonic() + 0.05, None, errors,
+    )
+    assert [p["created_utc"] for p in first] == [100, 99]
+    assert state["done"] is False
+    assert state["next_before"] == 99
+
+    # Resume: no deadline -> drains the rest and reports done.
+    rest, state2 = collector._collect_kind(
+        "lupus", "post", 0, state["next_before"], None, False, None,
+        None, None, errors,
+    )
+    assert [p["created_utc"] for p in rest] == [98, 97, 96, 95]
+    assert state2["done"] is True
 
 
 def test_fallback_keywords():

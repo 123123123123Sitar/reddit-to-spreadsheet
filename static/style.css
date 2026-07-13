@@ -200,6 +200,8 @@ a { color: var(--accent-ink); }
 .field-optional { text-transform: none; letter-spacing: 0; font-weight: 400; }
 .field-help { margin: 7px 0 0; font-size: 0.82rem; color: var(--muted); }
 .topic-field { margin-top: 18px; }
+.deep-pull { margin: 16px 0 14px; }
+.deep-pull .field-help { margin-top: 5px; }
 
 .search-field { margin-bottom: 14px; }
 .search-input {

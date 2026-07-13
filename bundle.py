@@ -44,7 +44,9 @@ def _group_by_sub(records: list[dict]) -> dict[str, list[dict]]:
     return groups
 
 
-def _ndjson_zst(records: list[dict]) -> bytes:
+def ndjson_zst_bytes(records: list[dict]) -> bytes:
+    """One zstd frame of NDJSON. Frames concatenate into a valid .ndjson.zst
+    stream, which is what the chunked deep-pull API relies on."""
     lines = "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in records)
     return zstandard.ZstdCompressor().compress(lines.encode("utf-8"))
 
@@ -64,7 +66,7 @@ def build_zip_bytes(
             for sub in sorted(groups, key=str.lower):
                 zf.writestr(
                     f"raw/{_safe_component(sub)}_{kind}.ndjson.zst",
-                    _ndjson_zst(groups[sub]),
+                    ndjson_zst_bytes(groups[sub]),
                     # Already zstd-compressed; deflating again just wastes CPU.
                     compress_type=zipfile.ZIP_STORED,
                 )

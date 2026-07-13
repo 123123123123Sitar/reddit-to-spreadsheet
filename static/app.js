@@ -38,6 +38,7 @@
   const includeCommentsEl= $("include-comments");
   const excludeNamesEl   = $("exclude-usernames");
   const topicEl          = $("topic");
+  const deepPullEl       = $("deep-pull");
   const generateBtn      = $("generate");
   const generateLabel    = $("generate-label");
   const spinnerEl        = $("spinner");
@@ -389,8 +390,147 @@
     };
   }
 
+  // ---- Deep pull (chunked, resumable, unlimited size) --------------------
+  // The browser drives many /api/collect_chunk requests (each safely under
+  // the serverless time limit) and concatenates the zstd frames into one
+  // valid .ndjson.zst per subreddit per kind. Millions of records are fine.
+  let deepRunning = false;
+  let deepCancel = false;
+
+  window.addEventListener("beforeunload", (e) => {
+    if (deepRunning) { e.preventDefault(); e.returnValue = ""; }
+  });
+
+  function tsFromDate(iso) { return Math.floor(Date.parse(iso + "T00:00:00Z") / 1000); }
+
+  async function runDeepPull() {
+    deepRunning = true;
+    deepCancel = false;
+    spinnerEl.hidden = false;
+    generateLabel.textContent = "Stop deep pull";
+
+    const subs = Array.from(selected.values());
+    const topic = topicEl.value.trim();
+    const startTs = tsFromDate(startDateEl.value);
+    const endTs = tsFromDate(endDateEl.value) + 86400; // end date inclusive
+    const kinds = includeCommentsEl.checked ? ["post", "comment"] : ["post"];
+    const t0 = performance.now();
+    const files = [];
+    let grandTotal = 0;
+
+    try {
+      // Expand the topic once (keywords + dedicated subreddits).
+      let keywords = null;
+      let dedicated = new Set();
+      if (topic) {
+        showStatus("Deep pull: expanding the topic into keywords…");
+        try {
+          const r = await fetch("/api/expand_topic", {
+            method: "POST",
+            headers: { "Content-Type": "application/json", Accept: "application/json" },
+            body: JSON.stringify({ topic, subreddits: subs }),
+          });
+          if (r.ok) {
+            const d = await r.json();
+            keywords = (d.keywords || []).length ? d.keywords : null;
+            dedicated = new Set((d.dedicated || []).map((s) => s.toLowerCase()));
+          }
+        } catch (e) { /* no expansion -> pull unfiltered */ }
+      }
+
+      outer:
+      for (const sub of subs) {
+        for (const kind of kinds) {
+          const parts = [];
+          let got = 0, before = endTs, chunkN = 0, stalls = 0, fails = 0;
+
+          while (!deepCancel) {
+            chunkN++;
+            showStatus(
+              "Deep pull: r/" + sub + " " + kind + "s — " + got.toLocaleString() +
+              " collected (chunk " + chunkN + ", " + grandTotal.toLocaleString() +
+              " total so far). Keep this tab open; click the button to stop."
+            );
+            let res = null;
+            try {
+              res = await fetch("/api/collect_chunk", {
+                method: "POST",
+                headers: { "Content-Type": "application/json", Accept: "*/*" },
+                body: JSON.stringify({
+                  subreddit: sub,
+                  kind,
+                  before,
+                  after: startTs,
+                  exclude_usernames: excludeNamesEl.checked,
+                  keywords: keywords && !dedicated.has(sub.toLowerCase()) ? keywords : null,
+                }),
+              });
+            } catch (e) { /* network hiccup -> retry below */ }
+
+            if (!res || !res.ok) {
+              fails++;
+              if (fails > 3) {
+                showError("Deep pull: r/" + sub + " " + kind + "s kept failing — keeping what was collected and moving on.");
+                break;
+              }
+              await new Promise((r) => setTimeout(r, 4000 * fails));
+              continue;
+            }
+            fails = 0;
+
+            const buf = await res.arrayBuffer();
+            if (buf.byteLength) parts.push(buf);
+            const n = parseInt(res.headers.get("X-Chunk-Records"), 10) || 0;
+            got += n;
+            grandTotal += n;
+            if (res.headers.get("X-Chunk-Done") === "1") break;
+
+            const nb = parseInt(res.headers.get("X-Chunk-Next-Before"), 10);
+            if (!Number.isFinite(nb) || nb >= before) {
+              stalls++; // server made no progress (e.g. sources down)
+              if (stalls > 4) {
+                showError("Deep pull: r/" + sub + " " + kind + "s stalled (sources may be down) — keeping what was collected and moving on.");
+                break;
+              }
+              await new Promise((r) => setTimeout(r, 4000 * stalls));
+            } else {
+              stalls = 0;
+              before = nb;
+            }
+          }
+
+          if (parts.length) {
+            const fname = "reddit_" + sub + "_" + kind + "s.ndjson.zst";
+            triggerDownload(new Blob(parts, { type: "application/zstd" }), fname);
+            files.push("r/" + sub + " " + kind + "s: " + got.toLocaleString());
+          }
+          if (deepCancel) break outer;
+        }
+      }
+
+      const mins = ((performance.now() - t0) / 60000).toFixed(1);
+      showStatus(
+        (deepCancel ? "Deep pull stopped after " : "Deep pull finished in ") + mins +
+        " min — " + grandTotal.toLocaleString() + " records downloaded as .ndjson.zst files" +
+        (files.length ? " (" + files.join("; ") + ")" : "") +
+        ". If the browser asked to allow multiple downloads, approve it to receive every file.",
+        deepCancel ? "warn" : "ok"
+      );
+    } finally {
+      deepRunning = false;
+      deepCancel = false;
+      spinnerEl.hidden = true;
+      generateLabel.textContent = "Generate spreadsheet";
+    }
+  }
+
   // ---- Generate handler -------------------------------------------------
   function onGenerate() {
+    if (deepRunning) {  // button doubles as the stop control mid-pull
+      deepCancel = true;
+      generateLabel.textContent = "Stopping after this chunk…";
+      return;
+    }
     hideError();
     hideStatus();
     if (selected.size === 0) {
@@ -403,6 +543,11 @@
     }
     if (startDateEl.value > endDateEl.value) {
       showError("The start date must be on or before the end date.");
+      return;
+    }
+
+    if (deepPullEl && deepPullEl.checked) {
+      runDeepPull();
       return;
     }
 
@@ -601,9 +746,11 @@
       ["Communities", subs.length ? subs.length + " selected" : "none selected"],
       ["Window", dash(startDateEl.value) + "  →  " + dash(endDateEl.value)],
       ["Topic", topicEl.value.trim() ? '"' + topicEl.value.trim() + '"' : "everything"],
-      ["Per subreddit", perSub],
+      ["Per subreddit", deepPullEl && deepPullEl.checked ? "everything (deep pull ignores caps)" : perSub],
       ["Usernames", excludeNamesEl.checked ? "excluded" : "included"],
-      ["Download", ".zip — spreadsheet + raw .ndjson.zst"],
+      ["Download", deepPullEl && deepPullEl.checked
+        ? "raw .ndjson.zst files — complete, no spreadsheet"
+        : ".zip — spreadsheet + raw .ndjson.zst"],
     ].forEach(([k, v]) => {
       const row = el("div", { class: "recap-row" });
       row.appendChild(el("span", { class: "recap-k", text: k }));
@@ -632,6 +779,7 @@
   clearSelectionEl.addEventListener("click", clearSelection);
   generateBtn.addEventListener("click", onGenerate);
   includeCommentsEl.addEventListener("change", syncCommentsCap);
+  if (deepPullEl) deepPullEl.addEventListener("change", renderRecap);
 
   // ---- Init -------------------------------------------------------------
   syncCommentsCap();

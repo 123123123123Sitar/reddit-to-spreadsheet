@@ -57,7 +57,13 @@ Set `MERCURY_API_KEY` in the Vercel project (CLI above or Project → Settings �
 
 Vercel hard-kills the function at 300 s (the Hobby-plan maximum). When running on Vercel the collector therefore switches to a faster profile automatically (fewer retries, shorter waits) and stops collecting after ~250 s, returning **partial results** — the download still arrives, the status line says the export is partial, and the `X-Collect-Partial: 1` header is set. The budget is split **fairly across every subreddit × kind task** (task *i* of *N* must finish by *budget·(i+1)/N*, unused time rolls forward), so one huge subreddit's posts can't starve the comment collection behind it. For big pulls, narrow the window / lower the caps / split subreddits across runs, or just run the app locally (no budget applies there by default).
 
-Note that a **topic filter combined with huge caps** means scanning the *entire* window of every subreddit (caps count matching records), which rarely fits in 300 s across many subreddits — expect balanced-but-partial hosted results for that shape of run.
+Note that a **topic filter combined with huge caps** means scanning the *entire* window of every subreddit (caps count matching records), which rarely fits in 300 s across many subreddits — expect balanced-but-partial hosted results for that shape of run. For complete large pulls, use **deep pull** below.
+
+## Deep pull (unlimited size, works on the hosted version)
+
+The export step has a **Deep pull** toggle for runs the 300 s limit can't hold — hundreds of thousands or millions of records. Instead of one request, the browser drives many `POST /api/collect_chunk` calls, each safely under the serverless limit; every chunk returns raw zstd-NDJSON plus a resume cursor (`X-Chunk-Next-Before`, `X-Chunk-Done`), and the client concatenates the frames — concatenated zstd frames are a valid `.ndjson.zst` stream (verified against `zstd -dc`). You get one complete `reddit_<sub>_<posts|comments>.ndjson.zst` per subreddit per kind; caps are ignored, no spreadsheet is built (Excel tops out at ~1 M rows anyway), and the topic filter / dedicated-subreddit logic applies as usual via `POST /api/expand_topic`.
+
+Throughput comes from arctic_shift's `limit=auto` (up to 1 000 rows/page): measured ~8 000–40 000 records per chunk, so ~1 M comments is a 1–2 h browser session — keep the tab open, click the button again to stop early and keep what's collected, and approve the browser's "download multiple files" prompt. `RTS_CHUNK_BUDGET` (default 220 s) bounds each chunk server-side.
 
 The profile is env-tunable everywhere: `RTS_TIME_BUDGET` (seconds, 0 = unlimited), `RTS_MAX_ATTEMPTS`, `RTS_RETRY_MAX_WAIT`, `RTS_TIMEOUT`, `RTS_SLEEP`.
 
